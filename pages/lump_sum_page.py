@@ -1,5 +1,6 @@
 from appium.webdriver.common.appiumby import AppiumBy
 from pages.base_page import BasePage
+from config.settings import STATE_PROBE_WAIT, DEFAULT_WAIT, LONG_WAIT
 
 
 class LumpSumPage(BasePage):
@@ -60,6 +61,14 @@ class LumpSumPage(BasePage):
     # success screens are only reached when actually committing, which we avoid
     # outside the opt-in destructive test).
     SUCCESS_MARKERS = (AppiumBy.XPATH, "//*[contains(@text,'on its way') or contains(@text,'successful') or contains(@text,'Success') or contains(@text,'received') or contains(@text,'processing') or contains(@text,'Done')]")
+    # The withdrawal success screen specifically renders the copy 'Withdrawal
+    # Confirmed' (verified by the on-device withdrawal e2e). This is the oracle the
+    # destructive withdrawal flow asserts it reached.
+    WITHDRAWAL_CONFIRMED = (AppiumBy.XPATH, "//*[contains(@text,'Withdrawal Confirmed')]")
+    # The success screen's dismiss affordance ('Ok'/'OK'/'Done') sits on a clickable
+    # container; tap the last match (bottom button, not a title).
+    SUCCESS_DISMISS = (AppiumBy.XPATH,
+        "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Ok' or @text='OK' or @text='Done']]")
 
     # The large amount display. Verified on 2.39.1d: the headline amount is the
     # only $-TextView that is NOT inside a clickable container — the preset chips
@@ -100,14 +109,49 @@ class LumpSumPage(BasePage):
     def tap_withdraw(self):
         self.click(self.WITHDRAW_BUTTON)
 
-    def get_amount_display(self) -> str:
-        """Return the amount currently shown in the large display (e.g. '$10', '$0.00')."""
-        if self.is_present_now(self.CURRENT_AMOUNT):
+    def get_amount_display(self, timeout=STATE_PROBE_WAIT) -> str:
+        """Return the amount currently shown in the large display (e.g. '$10', '$0.00').
+
+        The headline is a Compose TextView that updates a BEAT LATE after a keypad
+        tap. A bare is_present_now() snapshot can fire before the new value renders
+        into the view tree and fall through to the '$0.00' AMOUNT_DISPLAY branch,
+        reading a stale zero (a value-mismatch flake right after enter_amount()).
+        So give CURRENT_AMOUNT a short WAITED probe; only fall back to the zero
+        marker if the display genuinely hasn't moved off $0.00."""
+        if self.is_visible(self.CURRENT_AMOUNT, timeout=timeout):
             return self.driver.find_element(*self.CURRENT_AMOUNT).text
         return self.get_text(self.AMOUNT_DISPLAY)
 
-    def amount_is_zero(self) -> bool:
-        return self.is_present_now(self.AMOUNT_DISPLAY)
+    def amount_is_zero(self, timeout=STATE_PROBE_WAIT) -> bool:
+        """True once the display has settled back to $0.00. The Compose headline
+        updates a beat late after clear_amount()/delete, so wait briefly rather
+        than reading an instant snapshot that can fire mid-update."""
+        return self.is_visible(self.AMOUNT_DISPLAY, timeout=timeout)
+
+    def get_available_balance(self) -> str:
+        """Return the 'Available: $X' text once the dollar figure has loaded.
+
+        The row text renders as the bare label 'Available:' first and the live
+        balance fills in a BEAT LATE from the backend on this heavy screen. A
+        single get_text() can therefore read 'Available:' with no money yet and
+        make a well-formed-money assertion fail spuriously. Poll the same element
+        until its text actually carries a money token (or the wait elapses, in
+        which case we return whatever is there so the caller's assertion reports
+        the real rendered string)."""
+        from utils.assertions import is_money
+        from selenium.webdriver.support.ui import WebDriverWait
+        from config.settings import POLL_INTERVAL
+
+        def _money_text(_):
+            els = self.driver.find_elements(*self.AVAILABLE_BALANCE)
+            if els and is_money(els[0].text):
+                return els[0].text
+            return False
+
+        try:
+            return WebDriverWait(self.driver, DEFAULT_WAIT, poll_frequency=POLL_INTERVAL).until(_money_text)
+        except Exception:
+            return self.get_text(self.AVAILABLE_BALANCE)
 
     # --- Confirmation dialog handling ---
     def is_confirmation_shown(self, timeout=None) -> bool:
@@ -128,6 +172,22 @@ class LumpSumPage(BasePage):
 
     def is_success_shown(self) -> bool:
         return self.is_visible(self.SUCCESS_MARKERS)
+
+    def is_withdrawal_confirmed(self, timeout=LONG_WAIT) -> bool:
+        """True once the 'Withdrawal Confirmed' success screen is up. The withdrawal
+        commits against the backend and settles a beat late on a slow emulator, so
+        give it the long wait rather than an instant snapshot."""
+        return self.is_present(self.WITHDRAWAL_CONFIRMED, timeout=timeout)
+
+    def dismiss_success(self):
+        """Tap the success screen's Ok/Done affordance to return to Home. Best-effort
+        — safe to call even if the screen already dismissed itself."""
+        try:
+            els = self.driver.find_elements(*self.SUCCESS_DISMISS)
+            if els:
+                els[-1].click()
+        except Exception:
+            pass
 
     def get_confirmation_amount(self) -> str:
         """Read the dollar amount rendered on the open confirmation sheet.

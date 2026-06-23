@@ -1,5 +1,5 @@
 from appium.webdriver.common.appiumby import AppiumBy
-from config.settings import DEFAULT_WAIT
+from config.settings import DEFAULT_WAIT, STATE_PROBE_WAIT
 from pages.base_page import BasePage
 
 
@@ -7,7 +7,19 @@ class LoginPage(BasePage):
     TITLE = (AppiumBy.XPATH, "//*[@text='Log in to Raiz']")
     EMAIL_FIELD = (AppiumBy.XPATH, "//android.widget.EditText[.//android.widget.TextView[@text='Email address']]")
     PASSWORD_FIELD = (AppiumBy.XPATH, "//android.widget.EditText[.//android.widget.TextView[@text='Raiz password']]")
-    SHOW_PASSWORD_BUTTON = (AppiumBy.XPATH, "(//android.widget.Button)[2]")
+    # The show/hide-password eye control. This is a Compose surface, so the
+    # toggle is most reliably a clickable element bearing a "show"/"hide"/"password"
+    # content-desc rather than a positional android.widget.Button (the only Buttons
+    # on the login form are the top chrome). We match by content-desc first and
+    # fall back to a clickable node inside the password field, then to the legacy
+    # positional Button as a last resort. WATCH: the eye's exact content-desc was
+    # not crawled — the inclusive matcher covers the common labels.
+    SHOW_PASSWORD_BUTTON = (AppiumBy.XPATH,
+        "//*[@clickable='true'][contains(@content-desc, 'show') or contains(@content-desc, 'Show') "
+        "or contains(@content-desc, 'hide') or contains(@content-desc, 'Hide') "
+        "or contains(@content-desc, 'password') or contains(@content-desc, 'Password') "
+        "or contains(@content-desc, 'reveal') or contains(@content-desc, 'visibility')]")
+    SHOW_PASSWORD_BUTTON_FALLBACK = (AppiumBy.XPATH, "(//android.widget.Button)[2]")
     FORGOT_PASSWORD_LINK = (AppiumBy.XPATH, "//android.widget.TextView[@text='Forgot your password?']")
     LOGIN_BUTTON = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Login']]")
     # Broad error matcher: the app may render the auth failure as "Invalid",
@@ -39,8 +51,16 @@ class LoginPage(BasePage):
         self.click(self.FORGOT_PASSWORD_LINK)
 
     def tap_show_password(self):
-        """Toggle the show/hide-password eye control."""
-        self.click_present(self.SHOW_PASSWORD_BUTTON)
+        """Toggle the show/hide-password eye control.
+
+        Prefer the content-desc-based locator (Compose-correct); fall back to the
+        legacy positional Button only if the labelled control isn't present, so a
+        change in the eye's content-desc doesn't silently tap the wrong chrome
+        button."""
+        if self.is_present(self.SHOW_PASSWORD_BUTTON, timeout=STATE_PROBE_WAIT):
+            self.click_present(self.SHOW_PASSWORD_BUTTON)
+        else:
+            self.click_present(self.SHOW_PASSWORD_BUTTON_FALLBACK)
 
     def login(self, email: str, password: str):
         self.enter_email(email)

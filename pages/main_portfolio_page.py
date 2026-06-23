@@ -102,6 +102,42 @@ class MainPortfolioPage(BasePage):
                 return t
         return ""
 
+    def _amount_after_label(self, label: str) -> str:
+        """Return the first money token rendered AFTER `label` in document order.
+
+        The Performance breakdown rows ('Market return to date:', 'Dividends:',
+        'Total returns:') render the label and its $ value as adjacent TextViews
+        in document order — not parent/child under a shared clickable container,
+        so `_row_amount` (which scopes to a clickable row) does not see them, and
+        the XPath2 `following::` axis errors on this Compose tree. Same ordered
+        TextView walk used by get_total_invested_amount(). Returns '' if the
+        label or a following money token is absent."""
+        tvs = self.driver.find_elements(AppiumBy.CLASS_NAME, "android.widget.TextView")
+        texts = [t.text for t in tvs if t.text]
+        try:
+            idx = texts.index(label)
+        except ValueError:
+            return ""
+        for t in texts[idx + 1:]:
+            if "$" in t:
+                return t
+        return ""
+
+    def get_market_return_amount(self) -> str:
+        """'Market return to date:' value from the Performance breakdown."""
+        self.scroll_to_text("Market return to date:")
+        return self._amount_after_label("Market return to date:")
+
+    def get_dividends_amount(self) -> str:
+        """'Dividends:' value from the Performance breakdown."""
+        self.scroll_to_text("Dividends:")
+        return self._amount_after_label("Dividends:")
+
+    def get_total_returns_amount(self) -> str:
+        """'Total returns:' value from the Performance breakdown."""
+        self.scroll_to_text("Total returns:")
+        return self._amount_after_label("Total returns:")
+
     def tap_add_funds(self):
         self.click(self.ADD_FUNDS_BUTTON)
 

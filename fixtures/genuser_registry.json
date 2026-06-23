@@ -1,0 +1,56 @@
+{
+  "presence_funded": {
+    "key": "presence_funded",
+    "email": "fixture.presence_funded.1782113169@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 41965,
+    "created_at": 1782113411,
+    "onboarded": true,
+    "reused": false
+  },
+  "rich_withdrawal_buffer": {
+    "key": "rich_withdrawal_buffer",
+    "email": "fixture.rich_withdrawal_buffer.1782113560@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 41968,
+    "created_at": 1782113560,
+    "onboarded": true,
+    "reused": false
+  },
+  "kids_withdrawal_buffer": {
+    "key": "kids_withdrawal_buffer",
+    "email": "fixture.kids_withdrawal_buffer.1782177736@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 41972,
+    "created_at": 1782177737,
+    "onboarded": false,
+    "reused": false
+  },
+  "jars_withdrawal_buffer": {
+    "key": "jars_withdrawal_buffer",
+    "email": "fixture.jars_withdrawal_buffer.1782177737@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 41974,
+    "created_at": 1782177737,
+    "onboarded": false,
+    "reused": false
+  },
+  "kids_siblings_distinct": {
+    "key": "kids_siblings_distinct",
+    "email": "fixture.kids_siblings_distinct.1782186050@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 41976,
+    "created_at": 1782186052,
+    "onboarded": true,
+    "reused": false
+  },
+  "history_seeded_deposit": {
+    "key": "history_seeded_deposit",
+    "email": "fixture.history_seeded_deposit.1782186352@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 41997,
+    "created_at": 1782186352,
+    "onboarded": true,
+    "reused": false
+  }
+}

@@ -1,9 +1,13 @@
+import os
 import pytest
 import _profile_hook  # noqa: F401  (no-op unless PROFILE_TESTS=1)
 from appium import webdriver as appium_webdriver
 from appium.webdriver.common.appiumby import AppiumBy
 from config.capabilities import get_android_options, get_ios_options
-from config.settings import APPIUM_HOST, PLATFORM, STATE_PROBE_WAIT, TEST_EMAIL, TEST_PASSWORD, TEST_PIN
+from config.settings import (
+    APPIUM_HOST, PLATFORM, STATE_PROBE_WAIT, DEFAULT_WAIT, LONG_WAIT, POLL_INTERVAL,
+    TEST_EMAIL, TEST_PASSWORD, TEST_PIN,
+)
 from pages.splash_page import SplashPage
 from pages.login_page import LoginPage
 from pages.pin_page import PinPage
@@ -11,16 +15,98 @@ from pages.home_page import HomePage
 from utils.deep_links import DeepLinks
 
 
+# Dynamic work-queue support (pytest-xdist `-n N --dist load`): xdist holds all
+# collected tests in one queue and hands the next to whichever worker just freed
+# up. Each worker is its own process, so we pin it to its own device + Appium
+# server + ports here (gw0->5554, gw1->5556, gw2->5558), mirroring the
+# run_parallel.sh port map. `-n` must equal the device count or workers double up.
+# Override the map with ANDROID_DEVICE_MAP="udid,host,sysport,mjpeg;udid,..." env.
+_DEFAULT_DEVICE_MAP = [
+    ("emulator-5554", "http://127.0.0.1:4723", "8201", "7811"),
+    ("emulator-5556", "http://127.0.0.1:4724", "8202", "7812"),
+    ("emulator-5558", "http://127.0.0.1:4725", "8204", "7814"),
+]
+
+
+def _device_map():
+    raw = os.getenv("ANDROID_DEVICE_MAP")
+    if not raw:
+        return _DEFAULT_DEVICE_MAP
+    out = []
+    for row in raw.split(";"):
+        parts = [p.strip() for p in row.split(",")]
+        if len(parts) == 4:
+            out.append(tuple(parts))
+    return out or _DEFAULT_DEVICE_MAP
+
+
+def _xdist_device():
+    """Return (udid, appium_host, system_port, mjpeg_port) for this xdist worker,
+    or None when not running distributed (single-device behaviour via env)."""
+    worker = os.getenv("PYTEST_XDIST_WORKER")  # 'gw0','gw1',... under -n; unset otherwise
+    if not worker:
+        return None
+    try:
+        idx = int(worker.replace("gw", ""))
+    except ValueError:
+        idx = 0
+    table = _device_map()
+    return table[idx % len(table)]
+
+
 def _create_driver(no_reset: bool = True):
-    opts = get_android_options(no_reset) if PLATFORM == "android" else get_ios_options(no_reset)
-    return appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
+    if PLATFORM != "android":
+        return appium_webdriver.Remote(command_executor=APPIUM_HOST, options=get_ios_options(no_reset))
+    dev = _xdist_device()
+    if dev:
+        udid, host, sysport, mjpeg = dev
+        # systemPort/mjpegPort are read from env at call time inside
+        # get_android_options; the udid is import-bound there, so override it on the
+        # built options object.
+        os.environ["ANDROID_SYSTEM_PORT"] = sysport
+        os.environ["ANDROID_MJPEG_PORT"] = mjpeg
+        opts = get_android_options(no_reset)
+        opts.udid = udid
+        return appium_webdriver.Remote(command_executor=host, options=opts)
+    return appium_webdriver.Remote(command_executor=APPIUM_HOST, options=get_android_options(no_reset))
+
+
+_BIOMETRICS_TITLE = (AppiumBy.XPATH,
+    "//*[@text='Raiz Biometrics' or contains(@text, 'biometric') or contains(@text, 'Biometric')]")
+_BIOMETRICS_NO = (AppiumBy.XPATH,
+    "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='No']]")
+
+
+def _dismiss_biometrics(driver, timeout=STATE_PROBE_WAIT) -> bool:
+    """Dismiss the 'Raiz Biometrics' enable prompt (a Yes/No dialog) by clicking No.
+
+    This prompt can overlay the PIN page — either as we arrive (blocking the
+    keypad) or right after the PIN is accepted (offering to enable biometric
+    login). We never enrol biometrics in tests, so always choose No. Pass
+    timeout=0 for an instant snapshot check (no polling)."""
+    from pages.base_page import BasePage
+    bp = BasePage(driver)
+    present = (bp.is_present_now(_BIOMETRICS_TITLE) if timeout == 0
+               else bp.is_visible(_BIOMETRICS_TITLE, timeout=timeout))
+    if not present:
+        return False
+    try:
+        bp.click(_BIOMETRICS_NO)
+        driver._biometrics_dismissed = True
+        driver._biometrics_pending = False
+        return True
+    except Exception:
+        return False
 
 
 def _enter_pin(pin: PinPage, driver):
-    """Enter the test PIN and mark biometrics as possibly pending so the next dismiss_modal
-    waits for it to render. Biometrics only appears immediately after PIN entry."""
+    """Enter the test PIN, handling the biometric-login prompt that can appear on
+    the PIN page. The prompt can overlay the keypad on arrival, or pop up right
+    after the PIN is accepted — in either case we click No (never enrol)."""
+    _dismiss_biometrics(driver, timeout=0)  # clear an overlay before typing
     pin.enter_pin(TEST_PIN)
     driver._biometrics_pending = True
+    _dismiss_biometrics(driver)             # prompt usually appears AFTER the PIN
 
 
 def _open_deep_link(driver, link: str):
@@ -37,38 +123,131 @@ def _open_deep_link(driver, link: str):
         _enter_pin(pin, driver)
 
 
+_SHARED_LOGIN_LOCK = "/tmp/raiz_shared_account_login.lock"
+
+
+class _login_gate:
+    """Cross-process lock that serializes CREDENTIAL logins to the single shared
+    test account across parallel device processes.
+
+    Running the suite across N emulators means N processes can hit the splash→login
+    path at the same moment, all fresh-authenticating the ONE shared account
+    simultaneously. That burst races on the backend and leaves some devices stuck on
+    a loading/error screen that never resolves to Home (the deterministic
+    `_ensure_logged_in` is_loaded failure seen when 3 devices start logged-out at
+    once). Holding this lock through one device's login — until the app settles onto
+    PIN or Home — lets each device establish its session in turn.
+
+    Cheap in steady state: with no_reset the session persists, so a device that is
+    already logged in (PIN/Home path) never enters this gate. Only the first
+    logged-out burst pays the serialization cost. Unix-only (fcntl); the suite runs
+    on macOS. Best-effort — if locking is unavailable the login still proceeds."""
+
+    def __enter__(self):
+        self._fd = None
+        try:
+            import fcntl
+            self._fd = os.open(_SHARED_LOGIN_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        except Exception:
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except Exception:
+                    pass
+                self._fd = None
+        return self
+
+    def __exit__(self, *exc):
+        if self._fd is None:
+            return
+        try:
+            import fcntl
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.close(self._fd)
+            except Exception:
+                pass
+
+
 def _ensure_logged_in(driver):
     """
-    Handle whatever state the app is in on launch:
+    Drive the app to the Home screen from whatever state it launched into:
     - Splash screen → tap Log in → enter credentials
     - PIN screen → enter PIN
     - Home screen → already ready
     - Post-login modal → dismiss it
-    """
+
+    Robust against a cold launch: the app spends the first beat on a branded
+    loading screen that is NEITHER splash, PIN, nor Home, and each transition
+    (splash→login, login→PIN, PIN→home, deep-link→PIN) can take longer than a
+    single STATE_PROBE_WAIT on a slow emulator (~1-3s RTT). A one-shot linear
+    sequence therefore races and lands "nowhere", which is exactly the
+    deterministic conftest:154 failure. Instead we loop: on each pass we resolve
+    whichever screen is currently up and re-check Home, retrying the HOME
+    deep-link until we either reach Home or hit an overall deadline. This is
+    purely login-path hardening — it changes nothing the tests assert."""
+    import time
+
     splash = SplashPage(driver)
     login = LoginPage(driver)
     pin = PinPage(driver)
     home = HomePage(driver)
 
-    # State probes: snapshots first — whichever screen is up is already rendered.
-    if pin.is_present_now(pin.TITLE):
-        _enter_pin(pin, driver)
-    elif splash.is_present_now(splash.TAGLINE):
-        splash.tap_log_in()
-        login.login(TEST_EMAIL, TEST_PASSWORD)
-        if pin.is_loaded(timeout=STATE_PROBE_WAIT):
-            _enter_pin(pin, driver)
-    elif home.is_present_now(home.TOTAL_VALUE_LABEL):
-        pass  # already on home
+    deadline = time.time() + LONG_WAIT * 3  # generous overall budget for a cold start
+    deep_linked = False
 
-    # If we still aren't on home (unknown screen or initial render still settling), deep-link.
-    if not home.is_loaded(timeout=STATE_PROBE_WAIT):
-        DeepLinks.open(driver, DeepLinks.HOME)
-        if pin.is_loaded(timeout=STATE_PROBE_WAIT):
+    while time.time() < deadline:
+        # Already there? Poll briefly so a still-settling Home render counts.
+        if home.is_loaded(timeout=STATE_PROBE_WAIT):
+            break
+
+        # PIN can overlay at any point (initial launch, post-login, post-deep-link).
+        if pin.is_present_now(pin.TITLE):
             _enter_pin(pin, driver)
+            continue
+
+        # Logged out: walk the splash → login → (PIN) path.
+        if splash.is_present_now(splash.TAGLINE):
+            splash.tap_log_in()
+            if login.is_loaded(timeout=DEFAULT_WAIT):
+                # Serialize the credential login + its resolution across devices so
+                # parallel logged-out starts don't stampede the one shared account.
+                with _login_gate():
+                    login.login(TEST_EMAIL, TEST_PASSWORD)
+                    # Hold the gate until login resolves to PIN or Home, so this
+                    # device's session is established before the next one logs in.
+                    pin.is_loaded(timeout=DEFAULT_WAIT)
+            else:
+                pin.is_loaded(timeout=DEFAULT_WAIT)
+            continue
+
+        # Login form already up (e.g. splash auto-advanced past the tagline).
+        if login.is_present_now(login.TITLE):
+            with _login_gate():
+                login.login(TEST_EMAIL, TEST_PASSWORD)
+                pin.is_loaded(timeout=DEFAULT_WAIT)
+            continue
+
+        # Unknown / still-loading screen. Try the HOME deep-link once, then keep
+        # looping so a PIN prompt it triggers (or a slow render) is handled above.
+        if not deep_linked:
+            DeepLinks.open(driver, DeepLinks.HOME)
+            deep_linked = True
+            pin.is_loaded(timeout=STATE_PROBE_WAIT)
+            continue
+
+        # Deep-link already attempted and we're still not anywhere we recognise:
+        # give the app a moment to finish whatever it's doing, then re-probe.
+        time.sleep(POLL_INTERVAL * 5)
 
     home.dismiss_modal()
-    assert home.is_loaded(), "Expected to be on Home screen after login"
+    # Final settle wait before the hard assert: a freshly dismissed modal can leave
+    # Home recomposing for a beat. Re-check with a real poll, not a snapshot.
+    assert home.is_loaded(timeout=DEFAULT_WAIT), "Expected to be on Home screen after login"
 
 
 class _DriverProxy:
@@ -220,6 +399,12 @@ def settings(driver, home):
     from pages.settings_page import SettingsPage
     home.tap_settings()
     page = SettingsPage(driver)
+    # Retry once if the settings sheet didn't render (slow under memory pressure):
+    # return to a known Home, then re-open the gear before asserting.
+    if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+        _open_deep_link(driver, DeepLinks.HOME)
+        home.dismiss_modal()
+        home.tap_settings()
     assert page.is_loaded()
     return page
 
@@ -229,6 +414,10 @@ def main_portfolio(driver):
     from pages.main_portfolio_page import MainPortfolioPage
     _open_deep_link(driver, DeepLinks.INVEST)
     page = MainPortfolioPage(driver)
+    # One-shot reopen-retry (like rewards/settings/transaction_history): a single
+    # slow render under memory pressure shouldn't error the whole portfolio file.
+    if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+        _open_deep_link(driver, DeepLinks.INVEST)
     assert page.is_loaded()
     return page
 
@@ -238,6 +427,10 @@ def performance(driver):
     from pages.performance_page import PerformancePage
     _open_deep_link(driver, DeepLinks.PERFORMANCE)
     page = PerformancePage(driver)
+    # One-shot reopen-retry (the performance chart can be slow to render under
+    # memory pressure); matches the rewards/settings/transaction_history fixtures.
+    if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+        _open_deep_link(driver, DeepLinks.PERFORMANCE)
     assert page.is_loaded()
     return page
 
@@ -247,6 +440,11 @@ def rewards(driver):
     from pages.rewards_page import RewardsPage
     _open_deep_link(driver, DeepLinks.REWARDS)
     page = RewardsPage(driver)
+    # Rewards is a heavy partner-offers screen that can be slow to render under
+    # memory pressure; retry once (like the transaction_history fixture) before
+    # asserting, so a single slow load doesn't error the whole rewards file.
+    if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+        _open_deep_link(driver, DeepLinks.REWARDS)
     assert page.is_loaded()
     return page
 
