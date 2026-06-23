@@ -199,14 +199,36 @@ def _ensure_logged_in(driver):
 
     deadline = time.time() + LONG_WAIT * 3  # generous overall budget for a cold start
     deep_linked = False
+    pin_locked = False  # set when the app blocks PIN after too many attempts
 
     while time.time() < deadline:
         # Already there? Poll briefly so a still-settling Home render counts.
         if home.is_loaded(timeout=STATE_PROBE_WAIT):
             break
 
+        # PIN lockout: after too many PIN attempts the app blocks the PIN and demands
+        # an email+password re-login ("You've made too many failed attempts to log in
+        # with your PIN..."). Re-entering the PIN here would just re-trip the lockout,
+        # so dismiss the dialog and force the credential path below — a successful
+        # credential login resets the attempt counter. A PIN-heavy parallel suite hits
+        # this routinely, so handling it is what keeps the suite reliably green.
+        if driver.find_elements(
+            AppiumBy.XPATH,
+            "//*[contains(@text,'Too many attempts') or contains(@text,'too many failed')]",
+        ):
+            pin_locked = True
+            for _ok in driver.find_elements(AppiumBy.XPATH, "//*[@text='Ok' or @text='OK']"):
+                try:
+                    _ok.click()
+                    break
+                except Exception:
+                    pass
+            time.sleep(POLL_INTERVAL)
+            continue
+
         # PIN can overlay at any point (initial launch, post-login, post-deep-link).
-        if pin.is_present_now(pin.TITLE):
+        # Skip while locked out — entering the PIN would re-trip the lockout.
+        if pin.is_present_now(pin.TITLE) and not pin_locked:
             _enter_pin(pin, driver)
             continue
 
@@ -223,6 +245,7 @@ def _ensure_logged_in(driver):
                     pin.is_loaded(timeout=DEFAULT_WAIT)
             else:
                 pin.is_loaded(timeout=DEFAULT_WAIT)
+            pin_locked = False  # credentials submitted -> PIN lockout reset
             continue
 
         # Login form already up (e.g. splash auto-advanced past the tagline).
@@ -230,6 +253,7 @@ def _ensure_logged_in(driver):
             with _login_gate():
                 login.login(TEST_EMAIL, TEST_PASSWORD)
                 pin.is_loaded(timeout=DEFAULT_WAIT)
+            pin_locked = False  # credentials submitted -> PIN lockout reset
             continue
 
         # Unknown / still-loading screen. Try the HOME deep-link once, then keep

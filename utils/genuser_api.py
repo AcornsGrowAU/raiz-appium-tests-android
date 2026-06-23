@@ -165,6 +165,49 @@ def ach_credit(user_ref, amount, count=None, created_at="2024-01-01"):
     return e
 
 
+ACH_TXN_CAP = 10000  # backend caps a single ACH transfer at $10,000 (verified: 422 above)
+
+
+def ach_credits(user_ref, total, prefix="credit", cap=ACH_TXN_CAP, created_at="2024-01-01"):
+    """Build a REAL balance from ACH credit_investments (payment_method ACH), splitting
+    `total` into <=cap chunks (the backend rejects a single ACH transfer over $10k).
+
+    This is the ACCURATE way to seed a balance: unlike the `with_balance` trait (a
+    fabricated, market-priced holding whose value DRIFTS), these are real ACH lump-sum
+    investments that settle to current_balance == total EXACTLY and stay stable
+    (verified: credits summing $25,000 -> current_balance $25,000.00, unchanged over 40s).
+
+    Returns a dict {prefix_1: <credit>, ...} to splice into a gen payload via **. Use a
+    UNIQUE prefix per user so sibling sub-accounts' credit keys don't collide."""
+    amounts, remaining = [], round(float(total), 2)
+    while remaining > 0.005:
+        amt = min(cap, remaining)
+        amounts.append(round(amt, 2))
+        remaining = round(remaining - amt, 2)
+    return {f"{prefix}_{i + 1}": ach_credit(user_ref, a, created_at=created_at)
+            for i, a in enumerate(amounts)}
+
+
+def kid_user(email, first, parent_ref):
+    """A kid sub-account (its own user) under a parent with NO pre-seeded balance —
+    fund it with REAL ACH credits via `**ach_credits('@<ref>', total, prefix=...)`."""
+    u = funded_user(email, first)
+    u["traits"] = ["kid_account"] + u["traits"]
+    u["attributes"]["parent_user"] = parent_ref
+    u["attributes"]["kid_account_data"] = KID_ACCOUNT_DATA
+    return u
+
+
+def jar_user(email, first, parent_ref, jar_name):
+    """A jar sub-account (its own user) under a parent with NO pre-seeded balance —
+    fund it with REAL ACH credits via `**ach_credits('@<ref>', total, prefix=...)`."""
+    u = funded_user(email, first)
+    u["traits"] = ["jar_account"] + u["traits"]
+    u["attributes"]["parent_user"] = parent_ref
+    u["attributes"]["jar_account_data"] = {"name": jar_name}
+    return u
+
+
 def ach_withdrawal(user_ref, amount, created_at="2024-06-01"):
     return {"model": "debit_investment",
             "traits": ["with_shares_settled_status", "with_holdings"],

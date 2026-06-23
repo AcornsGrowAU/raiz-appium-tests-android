@@ -20,8 +20,7 @@ import time
 
 from utils.genuser_api import (
     SEEDED_PWD, can_login, current_balance, gen_create,
-    funded_user, with_balance_user, ach_credit,
-    kid_with_balance_user, jar_with_balance_user,
+    funded_user, ach_credit, ach_credits, kid_user, jar_user,
 )
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,68 +33,98 @@ _REGISTRY = os.path.join(_REPO, "fixtures", "genuser_registry.json")
 # `history_seeded_deposit` fixture builder below.
 HISTORY_SEEDED_DEPOSIT = 137.42
 
+# Deterministic jar card labels for the reusable `jars_siblings_distinct` fixture.
+# The app renders the jar row label from the jar's name, so on-device tests scope a
+# card to one jar by matching the name (JarsPage.get_jar_balance_by_name). Keep in
+# sync with the `jars_siblings_distinct` builder below.
+JAR_A_NAME = "QA Sib Jar Alpha"
+JAR_B_NAME = "QA Sib Jar Bravo"
+
+# Exact ACH-settled balance targets (built from real credit_investment / payment_method
+# ACH, max $10k per txn — see utils.genuser_api.ach_credits). These settle to
+# current_balance EXACTLY and stay stable (no market drift), which is why we use them
+# instead of the with_balance trait. The withdrawal buffer at $50k absorbs ~10,000
+# $5-draws before re-seeding. Sibling amounts are deliberately distinct.
+PRESENCE_BALANCE = 5000
+WITHDRAWAL_BUFFER = 50000
+KID_A_BALANCE, KID_B_BALANCE = 4000, 1200
+JAR_A_BALANCE, JAR_B_BALANCE = 4000, 1200
+
 # key -> (builder(email) -> {ref: entity, ...}, human description)
+# ALL balances are built from REAL ACH credit_investments (payment_method ACH) so they
+# settle to current_balance EXACTLY and stay stable (no market drift) — the accurate,
+# production-faithful money-in flow. (Previously these used the `with_balance` trait,
+# which fabricated market-priced holdings that drifted; that's been retired here.)
 FIXTURES = {
     "presence_funded": (
-        lambda email: {"user_1": with_balance_user(email, "PresFunded", bought_shares=1)},
-        "onboarded user with an immediate Aggressive balance (presence/value reads)",
+        lambda email: {"user_1": funded_user(email, "PresFunded"),
+                       **ach_credits("@user_1", PRESENCE_BALANCE)},
+        f"onboarded user with an exact ${PRESENCE_BALANCE:,} ACH-settled balance (presence/value reads)",
     ),
     "rich_withdrawal_buffer": (
-        # NB: credit_investment `count` makes the gen API 500 (any size) — so we use the
-        # `with_balance` trait (one entity, immediate priced Aggressive holdings) to reach
-        # ~$320k. In Raiz a withdrawal sells shares, so holdings ARE the withdrawal source.
-        # ~$320k / $5 per test -> ~64,000 runs before re-seeding.
-        lambda email: {"user_1": with_balance_user(email, "RichBuffer", bought_shares=500)},
-        "~$320,000 holdings buffer for withdrawal tests (draw $5 each)",
+        # Real ACH credits ($10k max/txn -> 5 x $10k = $50k). Each withdrawal test draws
+        # ~$5, so ~10,000 runs before re-seeding; balance is exact + stable (no drift).
+        lambda email: {"user_1": funded_user(email, "RichBuffer"),
+                       **ach_credits("@user_1", WITHDRAWAL_BUFFER)},
+        f"${WITHDRAWAL_BUFFER:,} ACH-settled buffer for withdrawal tests (draw $5 each; exact + stable)",
     ),
     # Sub-account buffers. A kid/jar is its OWN user (own login + own current_balance)
-    # under a parent — so on-device we log in AS the sub-account and use the same
-    # Withdraw flow. user_1 is the sub-account (its id/email is what gets stored).
+    # under a parent — on-device we log in AS the sub-account. user_1 is the sub-account
+    # (its id/email is stored); its balance is real ACH credits referencing @user_1.
     "kids_withdrawal_buffer": (
         lambda email: {
             "parent": funded_user("kp." + email, "KidBufParent"),
-            "user_1": kid_with_balance_user(email, "KidBuffer", "@parent", bought_shares=500),
+            "user_1": kid_user(email, "KidBuffer", "@parent"),
+            **ach_credits("@user_1", WITHDRAWAL_BUFFER, prefix="kidbuf"),
         },
-        "~$320,000 kid sub-account buffer for kid-withdrawal tests",
+        f"${WITHDRAWAL_BUFFER:,} ACH-settled kid sub-account buffer for kid-withdrawal tests",
     ),
     "jars_withdrawal_buffer": (
         lambda email: {
             "parent": funded_user("jp." + email, "JarBufParent"),
-            "user_1": jar_with_balance_user(email, "JarBuffer", "@parent", "QA WD Jar", bought_shares=500),
+            "user_1": jar_user(email, "JarBuffer", "@parent", "QA WD Jar"),
+            **ach_credits("@user_1", WITHDRAWAL_BUFFER, prefix="jarbuf"),
         },
-        "~$320,000 jar sub-account buffer for jar-withdrawal tests",
+        f"${WITHDRAWAL_BUFFER:,} ACH-settled jar sub-account buffer for jar-withdrawal tests",
     ),
-    # Two kid sub-accounts of DISTINCT balances under ONE parent. Used by the
-    # on-device kid-render value test (TC-03): we log in AS the parent, open the
-    # Kids list, and assert each rendered kid-card value matches that kid's own
-    # backend balance (band) and that the siblings are distinct. The two kids get
-    # different bought_shares so their priced holdings differ materially. Each
-    # kid is its OWN user (own login + own current_balance); both kid emails are
-    # stored alongside the parent so the test can read each ground-truth balance.
-    # The PARENT is the login user (stored at the bare `email`); the two kids get
-    # deterministic `a.<email>` / `b.<email>` addresses so the test reconstructs
-    # each kid's login from the stored parent email to read its backend balance.
-    # `user_1` is the parent so get_or_create_fixture_user stores the parent id and
-    # its reuse-login probe checks the parent (the account the device logs in as).
-    # A user carrying ONE known ACH credit of HISTORY_SEEDED_DEPOSIT, on top of a
-    # small with_balance holding so the account is non-empty/onboardable. The ACH
-    # credit (lump_sum credit_investment) renders as a 'Buy' row in Transaction
-    # History whose parsed amount == the seeded dollar value — that exact row is
-    # the oracle for the ledger-correctness test (TC-11). user_1 is the login user.
+    # One known ACH credit of HISTORY_SEEDED_DEPOSIT — the deposit renders as a 'Buy' row
+    # in Transaction History whose parsed amount == the seeded value (TC-11 ledger oracle),
+    # and current_balance == the deposit exactly. user_1 is the login user.
     "history_seeded_deposit": (
         lambda email: {
-            "user_1": with_balance_user(email, "HistDeposit", bought_shares=1),
+            "user_1": funded_user(email, "HistDeposit"),
             "deposit_1": ach_credit("@user_1", HISTORY_SEEDED_DEPOSIT),
         },
         f"user with one known ${HISTORY_SEEDED_DEPOSIT} ACH credit for transaction-history ledger test",
     ),
+    # Two kid sub-accounts of DISTINCT ACH-settled balances under ONE parent (TC-03):
+    # log in AS the parent, open Kids, assert each rendered kid-card value == that kid's
+    # own backend balance and the siblings differ. user_1 (parent) is the stored login
+    # user; the kids get deterministic a.<email>/b.<email> addresses so the test can
+    # reconstruct each kid's login to read its ground-truth balance.
     "kids_siblings_distinct": (
         lambda email: {
             "user_1": funded_user(email, "KidSibParent"),
-            "kid_a": kid_with_balance_user("a." + email, "KidSibAlpha", "@user_1", bought_shares=400),
-            "kid_b": kid_with_balance_user("b." + email, "KidSibBravo", "@user_1", bought_shares=120),
+            "kid_a": kid_user("a." + email, "KidSibAlpha", "@user_1"),
+            **ach_credits("@kid_a", KID_A_BALANCE, prefix="kida"),
+            "kid_b": kid_user("b." + email, "KidSibBravo", "@user_1"),
+            **ach_credits("@kid_b", KID_B_BALANCE, prefix="kidb"),
         },
-        "two kid sub-accounts of distinct balances under one parent (on-device kid render value test)",
+        f"two kid sub-accounts of distinct ACH-settled balances (${KID_A_BALANCE:,}/${KID_B_BALANCE:,}) under one parent",
+    ),
+    # Two NAMED jar sub-accounts of DISTINCT ACH-settled balances under ONE parent: log in
+    # AS the parent, open Jars, assert each name-scoped jar-card value
+    # (JarsPage.get_jar_balance_by_name) == that jar's backend balance and siblings differ.
+    # JAR_A_NAME / JAR_B_NAME are the card labels.
+    "jars_siblings_distinct": (
+        lambda email: {
+            "user_1": funded_user(email, "JarSibParent"),
+            "jar_a": jar_user("a." + email, "JarSibAlpha", "@user_1", JAR_A_NAME),
+            **ach_credits("@jar_a", JAR_A_BALANCE, prefix="jara"),
+            "jar_b": jar_user("b." + email, "JarSibBravo", "@user_1", JAR_B_NAME),
+            **ach_credits("@jar_b", JAR_B_BALANCE, prefix="jarb"),
+        },
+        f"two named jar sub-accounts of distinct ACH-settled balances (${JAR_A_BALANCE:,}/${JAR_B_BALANCE:,}) under one parent",
     ),
 }
 
