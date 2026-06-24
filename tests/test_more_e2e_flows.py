@@ -19,6 +19,7 @@ from pages.round_ups_page import RoundUpsPage
 from pages.super_page import SuperPage
 from pages.recurring_page import RecurringPage
 from pages.home_page import HomePage
+from pages.my_finance_page import MyFinancePage
 from utils.deep_links import DeepLinks
 from utils.assertions import assert_money, assert_positive_money, parse_money, is_money
 from conftest import _open_deep_link
@@ -164,32 +165,34 @@ class TestRoundUpsE2E:
         Crucially, this shared test account has NO Round-Ups activity — invested,
         auto and manual all read $0 and the list shows 'You don't have any spending
         yet.' With nothing in any bucket, a perfectly-working filter renders
-        IDENTICAL content across the three tabs, so an unconditional 'must differ'
-        assertion is unsound here. We therefore only assert differentiation when
-        the account actually has non-zero Round-Ups data; otherwise we assert the
-        honest empty-state invariant (the filters at least keep us on a coherent
-        dashboard). If the account is later funded with Round-Ups, the
-        differentiation branch becomes a real no-op guard again."""
+        IDENTICAL content across the three tabs, so the only meaningful assertion
+        (the tabs filter to DIFFERENT content) is unreachable.
+
+        INFRA-GATED: Round-Up accrual is not seedable — there is no gen-API recipe
+        to inject simulated card transactions that round up into invested/available
+        buckets, and we never tap money-moving actions on the shared account. So
+        rather than fall through to a vacuous empty-state pass (the prior bug: the
+        differentiation branch never ran and the test could not fail), we skip with
+        a precise reason whenever the account has no Round-Ups data to filter. When
+        an account is seeded with real Round-Up accrual this test starts running
+        its true assertion automatically — no edit required."""
         if not round_ups.is_linked():
             pytest.skip("No linked Round-Ups account — re-link 'Dag Site (US)' to cover this")
         # Decide data-presence from the headline total + empty-state BEFORE cycling
         # tabs — threshold-progress copy like '$5.00 until $5' is not filterable data.
-        has_data = round_ups.has_round_ups_data()
+        if not round_ups.has_round_ups_data():
+            pytest.skip(
+                "No Round-Up data to filter — needs accrual seed (round-up accrual "
+                "is infra-gated: no gen-API recipe to inject rounded-up transactions, "
+                "and money-moving taps are off-limits on the shared account). Without "
+                "data the All/Invested/Available tabs render identical content, so "
+                "the differentiation assertion is unreachable.")
         round_ups.click(round_ups.TAB_ALL)
         all_money = round_ups.get_money_texts()
         round_ups.click(round_ups.TAB_INVESTED)
         invested_money = round_ups.get_money_texts()
         round_ups.click(round_ups.TAB_AVAILABLE)
         available_money = round_ups.get_money_texts()
-
-        if not has_data:
-            # Empty account: identical content across tabs is correct, not a no-op.
-            # Assert the filters still render a coherent dashboard (stayed put).
-            assert round_ups.is_visible(round_ups.ROUND_UPS_INVESTED), (
-                "With no Round-Ups data the filter tabs should still keep us on the "
-                f"dashboard (All={all_money}, Invested={invested_money}, "
-                f"Available={available_money})")
-            return
         # With real data, at least one pair of tabs must differ — else it's a no-op.
         assert not (all_money == invested_money == available_money), (
             "All/Invested/Available filters rendered identical content despite "
@@ -335,10 +338,20 @@ class TestSuperE2E:
 @pytest.mark.regression
 class TestMyFinanceE2E:
 
-    def test_net_worth_section_loads(self, my_finance):
-        assert my_finance.is_visible(my_finance.NET_WORTH_HEADER)
-        assert my_finance.is_visible(my_finance.TOTAL_IN_INVESTMENTS)
-        assert my_finance.is_visible(my_finance.TOTAL_IN_SUPER)
+    def test_net_worth_headline_is_well_formed(self, my_finance):
+        """Smoke gate for the net-worth card: the section renders AND its
+        investments component reads as a well-formed dollar amount (not a blank /
+        $NaN placeholder). Downgraded from the old presence-only triple-assert —
+        the full per-component value coverage lives in
+        test_net_worth_breakdown_components_well_formed and
+        test_net_worth_values_are_well_formed; this keeps only a cheap headline
+        well-formedness smoke check rather than re-asserting mere visibility."""
+        my_finance.wait_for_net_worth()
+        assert my_finance.is_visible(my_finance.NET_WORTH_HEADER), \
+            "My Finance should render the 'My net worth' section"
+        investments = my_finance.get_investments_total_text()
+        assert is_money(investments), \
+            f"Net-worth investments headline not well-formed money: {investments!r}"
 
     def test_net_worth_values_are_well_formed(self, my_finance):
         """Every net-worth figure must be a well-formed dollar amount (catches the
@@ -421,20 +434,69 @@ class TestMyFinanceE2E:
 
     def test_super_component_reconciles_with_super_surface(self, driver, my_finance):
         """Cross-screen invariant (RAIZ-10251 family): the Superannuation figure on
-        My Finance must agree with the Raiz Super state. The test account's super
-        is unfunded, so the My Finance super total must read $0. If the account has
-        since been funded, skip rather than assert a stale expectation."""
+        My Finance must agree with the Raiz Super state.
+
+        Two branches, keyed off the actual Super surface state:
+
+        - UNFUNDED (this account today): raiz://raiz_super lands on onboarding
+          interstitials (insurance opt-in / "Super is Ready" / consolidation) and
+          there is no funded dashboard balance. The My Finance super total must
+          read $0. This branch runs and asserts on every run for the current
+          shared account.
+
+        - FUNDED: when a funded-super account exists, the Super surface renders a
+          real dashboard balance instead of onboarding. We then reconcile that
+          balance against My Finance 'Total in Superannuation' within a small
+          tolerance (live-price drift). INFRA-GATED today: funded super is NOT
+          seedable (no gen-API recipe to fund a member's super, and we never tap
+          the irreversible consolidation/contribution actions on the shared
+          account), so no funded dashboard has ever been crawled. Until a funded
+          account is available this branch skips with a clear reason rather than
+          fake a pass. It activates automatically the moment a funded Super
+          dashboard is reachable — no edit required."""
         my_finance.wait_for_net_worth()
         super_total = parse_money(my_finance.get_super_total_text())
         super_page = _open(driver, DeepLinks.RAIZ_SUPER, SuperPage(driver))
-        # Unfunded super opens onboarding interstitials (no funded dashboard).
-        if not (super_page.is_insurance_interstitial() or super_page.is_ready_screen(timeout=2)
-                or super_page.is_loaded(timeout=2)):
-            pytest.skip("Could not confirm Super onboarding state")
-        # Onboarding state == unfunded == $0 on My Finance.
-        assert super_total == 0, (
-            f"Super is unfunded (onboarding state) but My Finance shows "
-            f"${super_total} in Superannuation — cross-screen mismatch")
+
+        # Funded super renders a real dashboard balance rather than an onboarding
+        # interstitial. Detect onboarding first; anything else with a positive
+        # super balance on My Finance is the funded-reconciliation path.
+        is_onboarding = (super_page.is_insurance_interstitial()
+                         or super_page.is_ready_screen(timeout=2))
+
+        if is_onboarding:
+            # Onboarding state == unfunded == $0 on My Finance.
+            assert super_total == 0, (
+                f"Super is unfunded (onboarding state) but My Finance shows "
+                f"${super_total} in Superannuation — cross-screen mismatch")
+            return
+
+        # Not on a recognised onboarding step. If the Super surface didn't resolve
+        # at all, we can't reconcile either way.
+        if not super_page.is_loaded(timeout=2):
+            pytest.skip("Could not confirm Super surface state (deep link did not resolve)")
+
+        # FUNDED branch. A funded dashboard exposes a real super balance; pair the
+        # largest well-formed money figure on the Super surface (the headline
+        # balance) against the My Finance super total.
+        from utils.assertions import is_money as _is_money
+        super_money = [parse_money(el.text)
+                       for el in super_page.driver.find_elements(*MyFinancePage.MONEY_VALUES)
+                       if _is_money(el.text)]
+        if super_total == 0 or not any(v > 0 for v in super_money):
+            pytest.skip(
+                "Funded-super reconciliation needs a funded-super account — "
+                "INFRA-GATED: funded super is non-seedable (no gen-API recipe to "
+                "fund a member's super; money-moving Super actions are off-limits "
+                "on the shared account), so no funded dashboard exists to reconcile "
+                f"against (My Finance super=${super_total}, Super surface "
+                f"figures={super_money}).")
+        super_dashboard_balance = max(super_money)
+        tolerance = max(5.0, super_dashboard_balance * 0.02)  # absorb intraday drift
+        assert abs(super_total - super_dashboard_balance) <= tolerance, (
+            f"My Finance 'Total in Superannuation' (${super_total}) and the funded "
+            f"Super dashboard balance (${super_dashboard_balance}) differ by more "
+            f"than ${tolerance:.2f} — cross-screen mismatch")
 
     def test_category_spending_amounts_well_formed_when_present(self, my_finance):
         """When Category Spending has data (linked transactional accounts), every
