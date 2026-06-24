@@ -188,23 +188,51 @@ def ach_credits(user_ref, total, prefix="credit", cap=ACH_TXN_CAP, created_at="2
             for i, a in enumerate(amounts)}
 
 
-def kid_user(email, first, parent_ref):
+def kid_user(email, first, parent_ref, portfolio_name=None):
     """A kid sub-account (its own user) under a parent with NO pre-seeded balance —
-    fund it with REAL ACH credits via `**ach_credits('@<ref>', total, prefix=...)`."""
+    fund it with REAL ACH credits via `**ach_credits('@<ref>', total, prefix=...)`.
+    Pass portfolio_name (e.g. 'Aggressive'/'Moderate'/'Conservative') to store a
+    per-kid portfolio independent of the parent (verified accepted by the gen API)."""
     u = funded_user(email, first)
     u["traits"] = ["kid_account"] + u["traits"]
     u["attributes"]["parent_user"] = parent_ref
     u["attributes"]["kid_account_data"] = KID_ACCOUNT_DATA
+    if portfolio_name:
+        u["attributes"]["portfolio_name"] = portfolio_name
     return u
 
 
-def jar_user(email, first, parent_ref, jar_name):
+def jar_user(email, first, parent_ref, jar_name, portfolio_name=None, saving_amount=None,
+             icon_id=None):
     """A jar sub-account (its own user) under a parent with NO pre-seeded balance —
-    fund it with REAL ACH credits via `**ach_credits('@<ref>', total, prefix=...)`."""
+    fund it with REAL ACH credits via `**ach_credits('@<ref>', total, prefix=...)`.
+
+    - portfolio_name: store a per-jar portfolio independent of Main (verified accepted).
+    - saving_amount: the jar's savings GOAL/target (jar.saving_amount; exposed on the
+      jar detail). Used by jar-target-roundtrip / jar-goal-progress-ring.
+    - icon_id: jar tile icon (e.g. 'home')."""
     u = funded_user(email, first)
     u["traits"] = ["jar_account"] + u["traits"]
     u["attributes"]["parent_user"] = parent_ref
-    u["attributes"]["jar_account_data"] = {"name": jar_name}
+    jdata = {"name": jar_name}
+    if saving_amount is not None:
+        jdata["saving_amount"] = saving_amount
+    if icon_id is not None:
+        jdata["icon_id"] = icon_id
+    u["attributes"]["jar_account_data"] = jdata
+    if portfolio_name:
+        u["attributes"]["portfolio_name"] = portfolio_name
+    return u
+
+
+def tiered_user(email, first, plan_identifier="regular", portfolio_name="Aggressive"):
+    """A funded user on a specific PLAN TIER. plan_identifier is the backend Plan enum
+    value: 'starter' (the app's "Lite" plan), 'regular', or 'plus'. NOTE: 'lite' is
+    NOT a valid identifier (gen API 422 'Trait not registered: lite') — use 'starter'.
+    Starter only permits Conservative/Moderately Conservative/Moderate portfolios."""
+    u = funded_user(email, first)
+    u["attributes"]["plan_identifier"] = plan_identifier
+    u["attributes"]["portfolio_name"] = portfolio_name
     return u
 
 

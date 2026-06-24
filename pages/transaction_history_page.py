@@ -1,7 +1,8 @@
 import re
+import time
 
 from appium.webdriver.common.appiumby import AppiumBy
-from config.settings import DEFAULT_WAIT, STATE_PROBE_WAIT
+from config.settings import DEFAULT_WAIT, LONG_WAIT, POLL_INTERVAL, STATE_PROBE_WAIT
 from pages.base_page import BasePage
 
 # dd Mon yyyy  /  dd Mon  /  Mon dd, yyyy  — the date forms Raiz history rows use.
@@ -52,6 +53,12 @@ class TransactionHistoryPage(BasePage):
     FILTER_ABSENT_TYPE_OPTION = (AppiumBy.XPATH,
         f"//*[@clickable='true'][.//android.widget.TextView[@text='{FILTER_ABSENT_TYPE_NAME}']]")
     FILTER_APPLY = (AppiumBy.XPATH, "//*[@clickable='true'][.//android.widget.TextView[@text='Apply' or @text='Done' or @text='Show results']]")
+    # 'Cancel'/'Close' dismissal control on the filter sheet — used to prove the
+    # list survives an opened-then-cancelled filter (RAIZ-10063: list not refreshed
+    # after cancel). Some builds expose an explicit Cancel/Close label; others only
+    # the chevron/back affordance, so the cancel helper falls back to system-back.
+    FILTER_CANCEL = (AppiumBy.XPATH,
+        "//*[@clickable='true'][.//android.widget.TextView[@text='Cancel' or @text='Close']]")
     # Empty-state shown when a filter matches no transactions (verified on this build).
     EMPTY_STATE = (AppiumBy.XPATH,
         "//android.widget.TextView[contains(@text, 'no investments') or contains(@text, 'No transactions') or contains(@text, 'no transactions')]")
@@ -62,6 +69,26 @@ class TransactionHistoryPage(BasePage):
 
     def is_loaded(self, timeout=DEFAULT_WAIT) -> bool:
         return self.is_visible(self.TITLE, timeout=timeout)
+
+    def wait_for_rows(self, timeout=LONG_WAIT) -> bool:
+        """Wait until the transaction list has actually RENDERED its rows (or has
+        settled into its empty state), not just until the screen title appears.
+
+        The 'Transaction History' title paints as soon as the screen mounts, but
+        the rows arrive asynchronously over the network (1-3s RTT on the emulator).
+        Asserting on get_transactions()/find_deposit_rows_matching() right after
+        is_loaded() therefore races the fetch and intermittently sees an EMPTY
+        list — the exact symptom behind the '$X found none (visible rows: [])'
+        failures. Poll until at least one row is present (success) OR the empty
+        state shows (a genuinely empty ledger). Returns True once rows exist."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.driver.find_elements(*self.TRANSACTION_ROWS):
+                return True
+            if self.is_present_now(self.EMPTY_STATE):
+                return False
+            time.sleep(POLL_INTERVAL)
+        return bool(self.driver.find_elements(*self.TRANSACTION_ROWS))
 
     def get_transaction_count(self) -> int:
         return len(self.driver.find_elements(*self.TRANSACTION_ROWS))
@@ -142,6 +169,81 @@ class TransactionHistoryPage(BasePage):
     def shows_empty_state(self) -> bool:
         """True if the list is showing its 'no transactions' empty state."""
         return self.is_present_now(self.EMPTY_STATE)
+
+    def find_deposit_rows_matching(self, target_amount: float, tol: float = 0.005) -> list[dict]:
+        """Return the parsed deposit/investment rows whose dollar amount equals
+        `target_amount` (within `tol`). A deposit/lump-sum credit renders as a
+        'Buy' row, so we accept Buy-typed rows. This is the VALUE oracle: it
+        asserts a row with the exact seeded amount exists, not mere presence of
+        any row. Scrolls the list so a target that sits below the fold is found."""
+        deposit_types = ("Buy",)
+        seen_keys = set()
+        matches = []
+
+        # The list rows arrive async after the screen mounts; give them a beat to
+        # render before scanning so we don't scroll/scan an empty (not-yet-loaded)
+        # list and wrongly conclude the seeded row is absent.
+        self.wait_for_rows()
+
+        def _collect():
+            for r in self.get_transactions(limit=60):
+                amt = parse_money(r.get("amount", ""))
+                if amt is None:
+                    continue
+                key = (r.get("type"), r.get("amount"), r.get("date_text"))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                if r.get("type") in deposit_types and abs(amt - target_amount) <= tol:
+                    matches.append(r)
+
+        _collect()
+        # Scroll a few pages in case the seeded credit is below the initial fold.
+        for _ in range(6):
+            if matches:
+                break
+            before = len(seen_keys)
+            self.scroll_down()
+            _collect()
+            if len(seen_keys) == before:
+                break  # reached the end of the list; nothing new rendered
+        self.scroll_to_top()
+        return matches
+
+    def cancel_filter(self) -> bool:
+        """Open the filter sheet, then DISMISS it without applying (Cancel/Close,
+        falling back to system-back). Returns True once back on the history list.
+
+        Targets the RAIZ-10063 class of defect: the list must still be rendered
+        (not blanked / not stuck on the sheet) after a cancelled filter."""
+        if not self.open_filter():
+            return False
+        if self.is_present_now(self.FILTER_CANCEL):
+            self.click(self.FILTER_CANCEL)
+        else:
+            self.go_back()
+        if not self.is_loaded(timeout=DEFAULT_WAIT):
+            return False
+        # The list re-renders after the sheet dismisses; wait for the rows to come
+        # back before the caller reads the post-cancel row count, otherwise the
+        # count-preserved assertion races the re-render.
+        self.wait_for_rows()
+        return True
+
+
+def parse_money(text: str):
+    """Parse a Raiz money string ('$137.42', '-$5.00', '$1,234.56') to a float.
+    Returns the absolute dollar value (sign-agnostic — deposit vs debit is read
+    from the row TYPE, not the sign). None if no dollar amount is present."""
+    if not text:
+        return None
+    m = re.search(r"-?\$\s*([\d,]+(?:\.\d+)?)", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
 
 def _parse_date_key(text: str):
