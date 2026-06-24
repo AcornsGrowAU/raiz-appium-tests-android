@@ -78,6 +78,43 @@ def _recover_home(driver):
     return HomePage(driver).is_loaded()
 
 
+def _click_in_screen_link(driver, label: str, timeout=STATE_PROBE_WAIT) -> bool:
+    """Tap an in-screen cross-link by its TextView label, robustly.
+
+    Cross-links on the Recurring / Journey / Future surfaces can render a beat
+    after the deep link resolves and may sit below the fold on a slower device.
+    Rather than an instant is_present_now() snapshot (which can miss a lazily
+    rendered or off-screen link), we: wait for the clickable-View form, then the
+    bare-text form, and — if still absent — scroll the label into view with a
+    CONTROLLED scroll_to_text before clicking. Returns True if a tap was made."""
+    page = BasePage(driver)
+    clickable = _xpath(f"//*[@clickable='true'][.//android.widget.TextView[contains(@text,'{label}')]]")
+    bare = _xpath(f"//*[contains(@text,'{label}')]")
+    if page.is_visible(clickable, timeout=timeout):
+        page.click(clickable)
+        return True
+    if page.is_present_now(bare):
+        page.click(bare)
+        return True
+    # Lazily rendered / below the fold — scroll it in, then retry. Use a
+    # CONTAINS scroll (textContains) so partial labels like 'Add a Raiz Kid'
+    # match the full on-screen copy ('Add a Raiz Kid now').
+    try:
+        driver.find_element(
+            AppiumBy.ANDROID_UIAUTOMATOR,
+            'new UiScrollable(new UiSelector().scrollable(true))'
+            f'.scrollIntoView(new UiSelector().textContains("{label}"))')
+    except Exception:
+        pass
+    if page.is_present_now(clickable):
+        page.click(clickable)
+        return True
+    if page.is_visible(bare, timeout=timeout):
+        page.click(bare)
+        return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # 1. Deep-link → REAL destination (every deep-link area)                       #
 # --------------------------------------------------------------------------- #
@@ -142,8 +179,13 @@ class TestDeepLinkLoadsRealDestination:
          lambda d: _present(d, "//*[contains(@text,'push notifications') or contains(@text,'New Features') "
                                "or contains(@text,'Notification')]")),
         ("fees", DeepLinks.FEES,
-         lambda d: _present(d, "//*[contains(@text,'0.275%') or contains(@text,'Pricing plan') "
-                               "or contains(@text,'Fee') or contains(@text,'fee')]")),
+         # THIN NAV PRESENCE ONLY (P1-01): assert we landed on the Plans-and-fees
+         # surface by its stable screen identity (the 'Pricing plan'/'PLAN' label),
+         # NOT by an OR'd fee-keyword that any dollar figure would satisfy. The
+         # EXACT monthly fee VALUE ($5.50 on the regular tier) is asserted in
+         # tests/test_settings_profile_value.py::test_plan_and_fees_render_exact_fee.
+         lambda d: _present(d, "//*[contains(@text,'Pricing plan') or @text='PLAN' "
+                               "or contains(@text,'Plans and fees')]")),
         ("offsetters", DeepLinks.OFFSETTERS,
          lambda d: _present(d, "//*[contains(@text,'Offset') or contains(@text,'big change') "
                                "or contains(@text,'Learn More')]")),
@@ -366,8 +408,13 @@ class TestSettingsCoverage:
          lambda d: _present(d, "//*[contains(@text,'read only access') or contains(@text,'Dag Site') "
                                "or contains(@text,'account')]"), True),
         ("Plans and fees", "tap_plans_and_fees",
-         lambda d: _present(d, "//*[contains(@text,'0.275%') or contains(@text,'Pricing plan') "
-                               "or contains(@text,'PLAN') or contains(@text,'Plan')]"), True),
+         # THIN NAV/BACK PRESENCE ONLY (P1-01): assert the Plans-and-fees screen
+         # opened (and Back returns to Settings), by its stable identity label —
+         # not by an OR'd fee-keyword that any dollar figure satisfies. The EXACT
+         # monthly fee VALUE is asserted in
+         # tests/test_settings_profile_value.py::test_plan_and_fees_render_exact_fee.
+         lambda d: _present(d, "//*[contains(@text,'Pricing plan') or @text='PLAN'"
+                               " or contains(@text,'Plans and fees')]"), True),
         ("Personal details", "tap_personal_details",
          lambda d: _present(d, "//*[contains(@text,'Legal First Name') or contains(@text,'Email') "
                                "or contains(@text,'Personal')]"), True),
@@ -384,8 +431,13 @@ class TestSettingsCoverage:
          lambda d: _present(d, "//*[contains(@text,'Invite') or contains(@text,'MYE3QG') "
                                "or contains(@text,'reward') or contains(@text,'friend')]"), True),
         ("Get support", "tap_get_support",
-         lambda d: _present(d, "//*[contains(@text,'Need a hand') or contains(@text,'Contact') "
-                               "or contains(@text,'1300 75 47 48') or contains(@text,'support')]"), True),
+         # 'Get support' opens an EXTERNAL browser (Chrome) to the support page,
+         # not an in-app screen — so leaving the Raiz app to a browser IS the
+         # success signal (the in-app text matcher only hits if the page renders
+         # in-process, which it doesn't on this build).
+         lambda d: d.current_package != ANDROID_APP_PACKAGE
+                   or _present(d, "//*[contains(@text,'Need a hand') or contains(@text,'Contact') "
+                                  "or contains(@text,'1300 75 47 48') or contains(@text,'support')]", timeout=8), True),
         ("Our terms", "tap_our_terms",
          # Opens an in-app WebView that loads the remote Terms & Conditions page
          # (title 'Terms & Conditions | Raiz Invest'); the remote content lands
@@ -541,21 +593,17 @@ class TestUiPathNavigation:
         # raiz://transactions: raiz://history (journey summary) > 'Transaction
         # history' link → the 'Transaction History' list.
         _open_deep_link(driver, DeepLinks.HISTORY)
-        link = _xpath("//*[@clickable='true'][.//android.widget.TextView[@text='Transaction history']]")
-        if not BasePage(driver).is_present_now(link):
-            link = _xpath("//*[@text='Transaction history']")
-        BasePage(driver).click(link)
+        assert _click_in_screen_link(driver, "Transaction history"), \
+            "Journey-summary 'Transaction history' link should be present and tappable"
         assert TransactionHistoryPage(driver).is_loaded(), \
             "Journey-summary 'Transaction history' link should open the real Transaction History list"
         _recover_home(driver)
 
     def test_future_view_my_portfolio_navigates(self, driver):
         _open_deep_link(driver, DeepLinks.FUTURE)
-        link = _xpath("//*[@clickable='true'][.//android.widget.TextView[@text='View my portfolio']]")
-        if not BasePage(driver).is_present_now(link):
-            link = _xpath("//*[@text='View my portfolio']")
-        if BasePage(driver).is_present_now(link):
-            BasePage(driver).click(link)
+        # Scroll-aware tap of the 'View my portfolio' CTA (sits at the bottom of
+        # the Future projection, below the fold on a slower device).
+        _click_in_screen_link(driver, "View my portfolio")
         # Destination not pinned by the map — assert we left Future onto a portfolio
         # surface (allocation breakdown or Main Portfolio), then recover.
         on_portfolio = (MainPortfolioPage(driver).is_loaded()
@@ -566,20 +614,16 @@ class TestUiPathNavigation:
 
     def test_recurring_add_kid_navigates(self, driver):
         _open_deep_link(driver, DeepLinks.RECURRING_INVESTMENTS)
-        link = _xpath("//*[@clickable='true'][.//android.widget.TextView[contains(@text,'Add a Raiz Kid')]]")
-        if not BasePage(driver).is_present_now(link):
-            link = _xpath("//*[contains(@text,'Add a Raiz Kid')]")
-        BasePage(driver).click(link)
+        assert _click_in_screen_link(driver, "Add a Raiz Kid"), \
+            "Recurring 'Add a Raiz Kid now' cross-link should be present and tappable"
         assert KidsPage(driver).is_loaded(), \
             "Recurring 'Add a Raiz Kid now' should open the Kids surface"
         _recover_home(driver)
 
     def test_recurring_create_jar_navigates(self, driver):
         _open_deep_link(driver, DeepLinks.RECURRING_INVESTMENTS)
-        link = _xpath("//*[@clickable='true'][.//android.widget.TextView[contains(@text,'Create your first Jar')]]")
-        if not BasePage(driver).is_present_now(link):
-            link = _xpath("//*[contains(@text,'Create your first Jar')]")
-        BasePage(driver).click(link)
+        assert _click_in_screen_link(driver, "Create your first Jar"), \
+            "Recurring 'Create your first Jar' cross-link should be present and tappable"
         assert JarsPage(driver).is_loaded(), \
             "Recurring 'Create your first Jar' should open the Jars surface"
         _recover_home(driver)
