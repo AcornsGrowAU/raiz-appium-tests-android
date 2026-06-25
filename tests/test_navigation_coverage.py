@@ -226,9 +226,19 @@ class TestDeepLinkLoadsRealDestination:
     @pytest.mark.parametrize("link,checker", [(c[1], c[2]) for c in CASES],
                              ids=[c[0] for c in CASES])
     def test_deep_link_loads_real_destination(self, driver, link, checker):
-        _open_deep_link(driver, link)
         if link == DeepLinks.DIVIDENDS:
+            # Dividends needs its 'Oops!'/PIN dialog dismissed before the checker can
+            # pass, so it can't use the readiness-aware settle (which would poll the
+            # checker behind the dialog) — open, dismiss, then assert.
+            _open_deep_link(driver, link)
             _dismiss_dividends_oops(driver)
+        else:
+            # Pass the checker as the readiness predicate: _open_deep_link polls until
+            # the real destination renders OR a (possibly late) PIN gate appears and is
+            # cleared. This closes the round_ups_settings flake, where the PIN re-auth
+            # surfaced after the old fixed-window probe and left us stranded on the PIN
+            # page when this assertion ran.
+            _open_deep_link(driver, link, ready=checker)
         assert checker(driver), f"{link} should load its real crawl-confirmed destination"
 
 

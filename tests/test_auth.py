@@ -40,6 +40,24 @@ def _open_login(driver) -> LoginPage:
     return login
 
 
+def _unlock_to_home(driver, pin: PinPage) -> HomePage:
+    """Enter the correct PIN and land on Home, relying on the CENTRAL biometric
+    handling in base_page.dismiss_modal().
+
+    The "Raiz Biometrics" Yes/No prompt can render a beat AFTER the PIN is
+    accepted. dismiss_modal() only gives that prompt a real polling wait when the
+    driver carries the `_biometrics_pending` flag — otherwise it takes an instant
+    snapshot that misses the late prompt, leaving it to block Home. The conftest
+    PIN helper sets that flag; these tests drive the keypad directly, so we set it
+    here too (mirroring conftest) instead of re-implementing any biometric clicks.
+    """
+    pin.enter_pin(TEST_PIN)
+    driver._biometrics_pending = True
+    home = HomePage(driver)
+    home.dismiss_modal()
+    return home
+
+
 @pytest.mark.auth
 @pytest.mark.smoke
 class TestLogin:
@@ -264,12 +282,11 @@ class TestPin:
         assert pin.is_loaded(), "PIN screen should appear on app restart"
 
     def test_correct_pin_navigates_home(self, driver):
-        driver.terminate_app("com.acornsau.android.development")
-        driver.activate_app("com.acornsau.android.development")
+        driver.terminate_app(ANDROID_APP_PACKAGE)
+        driver.activate_app(ANDROID_APP_PACKAGE)
         pin = PinPage(driver)
-        pin.enter_pin(TEST_PIN)
-        home = HomePage(driver)
-        home.dismiss_modal()
+        assert pin.is_loaded(), "PIN screen should appear on app restart"
+        home = _unlock_to_home(driver, pin)
         assert home.is_loaded(), "Correct PIN should navigate to Home"
 
     def test_log_out_from_pin_screen(self, driver):
@@ -299,11 +316,10 @@ class TestPin:
             "A wrong PIN must not unlock the app"
         assert pin.is_loaded(timeout=STATE_PROBE_WAIT) or pin.has_error(timeout=STATE_PROBE_WAIT), \
             "After a wrong PIN we should remain on the PIN screen (optionally with an error)"
-        # Recover: clear any partial entry and enter the correct PIN.
+        # Recover: clear any partial entry and enter the correct PIN. A 4-digit
+        # wrong PIN may auto-clear on rejection; delete is a safety no-op then.
         pin.tap_delete(times=4)
-        pin.enter_pin(TEST_PIN)
-        home = HomePage(driver)
-        home.dismiss_modal()
+        home = _unlock_to_home(driver, pin)
         assert home.is_loaded(), "Correct PIN after a wrong attempt should unlock the app"
 
     def test_pin_entry_is_masked(self, driver):
@@ -311,11 +327,16 @@ class TestPin:
         (the keypad keys themselves are excluded). Then unlock to stay logged in."""
         pin = self._restart_to_pin(driver)
         pin.enter_pin(TEST_PIN)
-        # If still on the PIN screen (shouldn't normally be after a full correct
-        # PIN), assert masking; either way the digits must never have leaked.
+        # The entered digits must never be echoed as readable on-screen text.
+        # digit_is_visible_as_text() already excludes the single keypad key that
+        # bears each digit (it counts >1 occurrence). Capture this while still on
+        # the PIN surface, before the correct PIN routes us away.
+        on_pin = pin.is_loaded(timeout=STATE_PROBE_WAIT)
         for digit in set(TEST_PIN):
-            assert not pin.digit_is_visible_as_text(digit) or not pin.is_loaded(timeout=0.5), \
+            assert not (on_pin and pin.digit_is_visible_as_text(digit)), \
                 f"PIN digit {digit!r} appears to be echoed as plain text — should be masked"
+        # Now finish unlocking (handles the late biometric prompt centrally).
+        driver._biometrics_pending = True
         home = HomePage(driver)
         home.dismiss_modal()
         assert home.is_loaded(), "Correct PIN should unlock the app"
@@ -329,9 +350,7 @@ class TestPin:
         assert pin.is_loaded(timeout=STATE_PROBE_WAIT), \
             "Backspace on an empty PIN must keep the keypad alive (RAIZ-10026)"
         # And the keypad still works afterwards.
-        pin.enter_pin(TEST_PIN)
-        home = HomePage(driver)
-        home.dismiss_modal()
+        home = _unlock_to_home(driver, pin)
         assert home.is_loaded(), "PIN keypad should still function after backspace-on-empty"
 
     def test_backspace_corrects_a_mistyped_pin(self, driver):
@@ -342,9 +361,7 @@ class TestPin:
         wrong_first = "9" if TEST_PIN[0] != "9" else "1"
         pin.tap_key(wrong_first)
         pin.tap_delete(times=1)
-        pin.enter_pin(TEST_PIN)
-        home = HomePage(driver)
-        home.dismiss_modal()
+        home = _unlock_to_home(driver, pin)
         assert home.is_loaded(), \
             "Backspacing a mistyped digit then entering the correct PIN should unlock"
 
@@ -368,7 +385,5 @@ class TestSessionPersistence:
         assert not login.is_present(login.TITLE, timeout=STATE_PROBE_WAIT), \
             "Relaunch must NOT require a full email/password login"
         # Restore home for subsequent tests.
-        pin.enter_pin(TEST_PIN)
-        home = HomePage(driver)
-        home.dismiss_modal()
+        home = _unlock_to_home(driver, pin)
         assert home.is_loaded(), "PIN should resume the persisted session to Home"

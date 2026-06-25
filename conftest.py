@@ -109,18 +109,85 @@ def _enter_pin(pin: PinPage, driver):
     _dismiss_biometrics(driver)             # prompt usually appears AFTER the PIN
 
 
-def _open_deep_link(driver, link: str):
+_PIN_LOCKOUT_XPATH = ("//*[contains(@text,'Too many attempts') "
+                      "or contains(@text,'too many failed')]")
+
+
+def _pin_locked_out(driver) -> bool:
+    """True if the app is showing the PIN-lockout dialog. Re-entering the PIN here
+    would just re-trip it — _ensure_logged_in owns that recovery — so callers bail
+    out of PIN entry when this is up."""
+    try:
+        return bool(driver.find_elements(AppiumBy.XPATH, _PIN_LOCKOUT_XPATH))
+    except Exception:
+        return False
+
+
+def _clear_pin_gate(driver, probe_timeout=STATE_PROBE_WAIT, attempts=2) -> bool:
+    """Enter the PIN if the unlock gate is up after navigation, and CONFIRM it
+    cleared — re-entering once if a swallowed first keypress left us stranded.
+
+    The old one-shot probe entered the PIN if it appeared within the window but
+    never checked that the unlock took. A tap on a still-composing Compose keypad
+    can be dropped, leaving the app on 'Enter your PIN' when the caller's assertion
+    runs (the round_ups_settings flake). Here we verify the title disappears and
+    re-enter once if it didn't. Bails out on PIN lockout so we never hammer the
+    keypad into a 'Too many attempts' block. Returns True if a gate was handled.
+    The common no-PIN path still costs a single STATE_PROBE_WAIT probe."""
+    import time
+    pin = PinPage(driver)
+    if not pin.is_loaded(timeout=probe_timeout):
+        return False
+    for _ in range(attempts):
+        if _pin_locked_out(driver):
+            return True
+        _enter_pin(pin, driver)
+        # Confirm the gate cleared: a valid PIN drops the 'Enter your PIN' title.
+        deadline = time.time() + DEFAULT_WAIT
+        while time.time() < deadline:
+            if not pin.is_present_now(pin.TITLE):
+                return True
+            time.sleep(POLL_INTERVAL * 3)
+        # Still on PIN — first keypress likely swallowed; loop re-enters once.
+    return True
+
+
+def _open_deep_link(driver, link: str, ready=None, settle=DEFAULT_WAIT):
     """Open a deep link, handling PIN re-authentication if the app requires it.
 
-    Some screens (deposit, withdraw, rewards) trigger a PIN check when navigated
-    to via deep link. This helper enters the PIN automatically if it appears.
+    Some screens (deposit, withdraw, round_ups/settings) trigger a PIN check when
+    navigated to — sometimes a beat AFTER the link resolves. Two call shapes:
+
+    - Without `ready` (most fixtures): open, then a single short PIN probe that now
+      also verifies the gate cleared (re-entering a swallowed keypress). Cost on the
+      common no-PIN path is unchanged — one STATE_PROBE_WAIT probe.
+    - With `ready` (a predicate that returns True once the real destination is up):
+      a readiness-aware settle — poll cheaply until the destination renders OR a PIN
+      gate appears (which we clear), up to `settle` seconds, exiting the instant the
+      destination is up. This closes the late-gate race that the fixed-window probe
+      misses, without penalising routes that never gate.
     """
+    import time
     DeepLinks.open(driver, link)
+    if ready is None:
+        _clear_pin_gate(driver)
+        return
     pin = PinPage(driver)
-    # PIN screen, if triggered, appears immediately — short probe avoids burning
-    # several seconds per fixture on the common no-PIN path.
-    if pin.is_loaded(timeout=STATE_PROBE_WAIT):
-        _enter_pin(pin, driver)
+    deadline = time.time() + settle
+    pin_entries = 0
+    while time.time() < deadline:
+        # A PIN gate up now takes priority — the destination can't be 'ready' behind
+        # it. Enter it (bounded; never past lockout) and re-loop to re-check.
+        if pin.is_present_now(pin.TITLE):
+            if pin_entries >= 3 or _pin_locked_out(driver):
+                return  # leave recovery to the caller's assert / _ensure_logged_in
+            _enter_pin(pin, driver)
+            pin_entries += 1
+            time.sleep(POLL_INTERVAL * 3)
+            continue
+        if ready(driver):
+            return
+        time.sleep(POLL_INTERVAL * 2)
 
 
 _SHARED_LOGIN_LOCK = "/tmp/raiz_shared_account_login.lock"
@@ -545,6 +612,12 @@ def pytest_configure(config):
     """Write environment.properties into the allure results dir so the report's
     Environment widget shows the build/device/host. Best-effort and safe when
     allure is off or the dir isn't set."""
+    # Install the live-driver tracking that screenshot-on-failure depends on.
+    # Done here (before any fixture/test builds a driver) so every Appium session
+    # — the shared `driver` fixture AND the genuser tests' own local drivers —
+    # is captured for the failure-screenshot hook below.
+    _install_driver_tracking()
+
     results = getattr(config.option, "allure_report_dir", None)
     if not results:
         return
@@ -562,3 +635,170 @@ def pytest_configure(config):
             fh.write(props)
     except Exception:
         pass
+
+
+# --- Screenshot (+ page source) on failure --------------------------------------
+# Attaches a screenshot of the device at the moment of failure to BOTH the Allure
+# report and the pytest-html report, and drops a PNG under reports/screenshots/ for
+# CI artifact archiving. Works for the two driver patterns in this suite with no
+# per-test edits:
+#   - shared-account tests use the session `driver` fixture (a _DriverProxy). Its
+#     underlying session is still alive when pytest_runtest_makereport fires, so we
+#     capture it there from the live-driver registry.
+#   - genuser_e2e tests build a local `appium_webdriver.Remote(...)` and quit() it in
+#     their own `finally`, which runs BEFORE makereport. So we also snapshot inside a
+#     wrapped quit() when an exception is in flight, stash it keyed by the current
+#     test, and let makereport drain the stash.
+# Everything here is best-effort and fully guarded — it must never turn a pass into a
+# failure or mask the real error.
+import threading as _threading
+
+_LIVE_DRIVERS = []                       # Appium sessions currently alive in THIS process
+_LIVE_LOCK = _threading.Lock()
+_PENDING_SHOTS = {}                      # nodeid -> [(png_bytes, page_source_str), ...]
+_SHOT_DIR = os.path.join(os.path.dirname(__file__), "reports", "screenshots")
+
+
+def _register_driver(d):
+    with _LIVE_LOCK:
+        _LIVE_DRIVERS.append(d)
+
+
+def _deregister_driver(d):
+    with _LIVE_LOCK:
+        try:
+            _LIVE_DRIVERS.remove(d)
+        except ValueError:
+            pass
+
+
+def _current_test_id():
+    """Stable nodeid for the test currently executing (no ' (call)'/'(setup)' suffix)."""
+    raw = os.environ.get("PYTEST_CURRENT_TEST", "")
+    return raw.split(" (")[0] if raw else ""
+
+
+def _grab(driver):
+    """Return (png_bytes_or_None, page_source_or_None) from a live Appium session."""
+    png = src = None
+    try:
+        png = driver.get_screenshot_as_png()
+    except Exception:
+        png = None
+    try:
+        src = driver.page_source
+    except Exception:
+        src = None
+    return png, src
+
+
+def _install_driver_tracking():
+    """Wrap appium.webdriver.Remote once so every constructed session is tracked.
+
+    Both the conftest fixture and the genuser tests construct via
+    `appium_webdriver.Remote(...)` (an attribute lookup on the appium.webdriver
+    module at call time), so replacing that attribute reaches all call sites."""
+    try:
+        from appium import webdriver as _aw
+    except Exception:
+        return
+    if getattr(_aw, "_raiz_shot_patched", False):
+        return
+    _RealRemote = _aw.Remote
+
+    class _TrackedRemote(_RealRemote):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            _register_driver(self)
+
+        def quit(self, *a, **k):
+            # If we're unwinding a failing test (its `finally: d.quit()` runs while
+            # the assertion error propagates), snapshot BEFORE tearing the session
+            # down — makereport fires too late, after this driver is already gone.
+            try:
+                import sys
+                if sys.exc_info()[0] is not None:
+                    nodeid = _current_test_id()
+                    if nodeid:
+                        png, src = _grab(self)
+                        if png or src:
+                            _PENDING_SHOTS.setdefault(nodeid, []).append((png, src))
+            except Exception:
+                pass
+            _deregister_driver(self)
+            return super().quit(*a, **k)
+
+    _aw.Remote = _TrackedRemote
+    _aw._raiz_shot_patched = True
+
+
+def _attach_shot(item, report, png, src, idx):
+    """Send one (png, src) to Allure, the pytest-html report, and disk."""
+    when = getattr(report, "when", "call")
+    # Allure
+    if png or src:
+        try:
+            import allure
+            if png:
+                allure.attach(png, name="failure-screenshot",
+                              attachment_type=allure.attachment_type.PNG)
+            if src:
+                allure.attach(src, name="page-source",
+                              attachment_type=allure.attachment_type.XML)
+        except Exception:
+            pass
+    # Disk (for CI artifact archiving + headless triage)
+    if png:
+        try:
+            os.makedirs(_SHOT_DIR, exist_ok=True)
+            import re
+            base = re.sub(r"[^A-Za-z0-9._-]+", "_", report.nodeid)[:150]
+            suffix = f"_{idx}" if idx else ""
+            with open(os.path.join(_SHOT_DIR, f"{base}__{when}{suffix}.png"), "wb") as fh:
+                fh.write(png)
+        except Exception:
+            pass
+    # pytest-html (inline base64 so it survives --self-contained-html)
+    if png:
+        try:
+            html = item.config.pluginmanager.getplugin("html")
+            if html is not None:
+                import base64
+                b64 = base64.b64encode(png).decode("ascii")
+                extras = getattr(report, "extras", [])
+                extras.append(html.extras.png(b64, name="failure-screenshot"))
+                report.extras = extras
+        except Exception:
+            pass
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """On a failed setup/call phase, attach a device screenshot + page source."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when not in ("setup", "call") or not report.failed:
+        return
+    try:
+        # 1) Genuser pattern: driver already quit in the test's finally — drain the
+        #    snapshot it stashed on the way out.
+        stashed = _PENDING_SHOTS.pop(item.nodeid, [])
+        for idx, (png, src) in enumerate(stashed):
+            _attach_shot(item, report, png, src, idx)
+        # 2) Shared-account pattern (or a leaked/never-quit driver): the session is
+        #    still alive — capture the active one now. Skip if (1) already produced
+        #    a shot for this test.
+        if not stashed:
+            with _LIVE_LOCK:
+                live = list(_LIVE_DRIVERS)
+            for d in reversed(live):          # newest first = the active session
+                png, src = _grab(d)
+                if png or src:
+                    _attach_shot(item, report, png, src, 0)
+                    break
+    except Exception:
+        pass
+    finally:
+        # Don't let the stash grow unbounded if a test passed after stashing
+        # (e.g. a caught-and-handled exception triggered a quit mid-test).
+        _PENDING_SHOTS.pop(item.nodeid, None)

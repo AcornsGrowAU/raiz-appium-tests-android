@@ -82,20 +82,36 @@ class TestRewardsTrackTab:
         assert rewards.is_visible(rewards.FEATURED_HEADER)
 
 
-def _open_rewards_link(rewards, link):
+def _open_rewards_link(rewards, link, ready=None):
     """PIN-aware deep-link open from within a test (mirrors conftest._open_deep_link).
 
     The `rewards` fixture only opens raiz://raiz_rewards; the linked-accounts and
     auto variants need their own navigation, and rewards screens can re-prompt for
     the PIN. We import PinPage lazily and reuse the page's existing driver.
+
+    `ready` is an optional zero-arg predicate that returns True once the target
+    surface has rendered. The linked-accounts/auto screens are heavy and lazy, and
+    deep-link nav on this build intermittently misroutes or drops back to the PIN;
+    if a readiness probe is given and the surface hasn't appeared, we re-open ONCE
+    (the same one-shot retry the conftest rewards/transaction fixtures use) before
+    handing back to the test's own waited assertions.
     """
     from pages.pin_page import PinPage
     from config.settings import STATE_PROBE_WAIT, TEST_PIN
-    DeepLinks.open(rewards.driver, link)
-    pin = PinPage(rewards.driver)
-    if pin.is_loaded(timeout=STATE_PROBE_WAIT):
-        pin.enter_pin(TEST_PIN)
-        rewards.driver._biometrics_pending = True
+
+    def _open_once():
+        DeepLinks.open(rewards.driver, link)
+        pin = PinPage(rewards.driver)
+        if pin.is_loaded(timeout=STATE_PROBE_WAIT):
+            pin.enter_pin(TEST_PIN)
+            rewards.driver._biometrics_pending = True
+        # Clear the biometric prompt that can follow a PIN re-entry, centrally
+        # (clicks 'No'); safe no-op when none is showing.
+        rewards.dismiss_modal()
+
+    _open_once()
+    if ready is not None and not ready():
+        _open_once()
 
 
 @pytest.mark.rewards
@@ -198,8 +214,16 @@ class TestRewardsDetailNavigation:
 class TestRewardsLinkedAccounts:
     """Linked-accounts screen shows institutions and/or an add-account affordance."""
 
+    def _linked_accounts_ready(self, rewards):
+        # The CDR-linked institutions and the add-account affordance lazy-load, so
+        # this probe (used for the one-shot reopen retry) waits rather than snapshots.
+        return (rewards.is_present_now(rewards.LINKED_ACCOUNTS_TITLE)
+                or rewards.is_visible(rewards.INSTITUTION_ROW, timeout=4)
+                or rewards.is_present_now(rewards.ADD_ACCOUNT_AFFORDANCE))
+
     def test_linked_accounts_screen_loads(self, rewards):
-        _open_rewards_link(rewards, DeepLinks.REWARDS_LINKED_ACCOUNTS)
+        _open_rewards_link(rewards, DeepLinks.REWARDS_LINKED_ACCOUNTS,
+                           ready=lambda: self._linked_accounts_ready(rewards))
         # Either the screen title, a linked institution, or an add affordance proves
         # we reached a real linked-accounts surface (not a blank/error screen).
         shown = (rewards.is_visible(rewards.LINKED_ACCOUNTS_TITLE, timeout=4)
@@ -208,8 +232,9 @@ class TestRewardsLinkedAccounts:
         assert shown, "Linked-accounts screen showed no title, institution, or add-account affordance"
 
     def test_linked_accounts_offers_institution_or_add_affordance(self, rewards):
-        _open_rewards_link(rewards, DeepLinks.REWARDS_LINKED_ACCOUNTS)
-        # Linked institutions (Amex/ANZ via the CDR sandbox) are fetched async, so
+        _open_rewards_link(rewards, DeepLinks.REWARDS_LINKED_ACCOUNTS,
+                           ready=lambda: self._linked_accounts_ready(rewards))
+        # Linked institutions (Dag Site CDR accounts) are fetched async, so
         # snapshot-checking right after navigation misses them — wait for them.
         has_institution = rewards.is_visible(rewards.INSTITUTION_ROW, timeout=6)
         has_add = rewards.is_visible(rewards.ADD_ACCOUNT_AFFORDANCE, timeout=4)
@@ -222,8 +247,13 @@ class TestRewardsAuto:
     """Auto rewards screen (raiz://rewards_auto)."""
 
     def test_auto_rewards_screen_loads(self, rewards):
-        _open_rewards_link(rewards, DeepLinks.REWARDS_AUTO)
-        # Auto-rewards surfaces an Auto title and/or a toggle control.
+        # The auto-rewards surface is the heavy Earn screen (Click-through/Automatic
+        # modes, Surveys/Shops, category chips) and renders lazily — wait for the
+        # marker as the readiness signal so the one-shot reopen can recover a slow
+        # or misrouted first navigation.
+        _open_rewards_link(rewards, DeepLinks.REWARDS_AUTO,
+                           ready=lambda: rewards.is_visible(rewards.AUTO_TITLE, timeout=6))
+        # Auto-rewards surfaces an Auto-mode marker and/or a toggle control.
         shown = (rewards.is_visible(rewards.AUTO_TITLE, timeout=4)
                  or rewards.is_present_now(rewards.AUTO_TOGGLE))
         assert shown, "Auto rewards screen showed neither an Auto title nor a toggle control"

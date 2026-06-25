@@ -10,16 +10,26 @@ Jars/Kids cards show only "Add"). That is also why the legacy test_jars.py /
 test_kids.py meaningful cases are xfail'd: the data, not the app, is the gap.
 """
 import os
+import time
+
 import pytest
+from appium import webdriver as appium_webdriver
 from appium.webdriver.common.appiumby import AppiumBy
 
+from config.capabilities import get_android_options
+from config.settings import APPIUM_HOST
 from pages.base_page import BasePage
 from pages.portfolio_allocation_page import PortfolioAllocationPage
+from pages.plus_builder_page import PlusBuilderPage
 from pages.jars_page import JarsPage
 from pages.kids_page import KidsPage
 from pages.home_page import HomePage
+from pages.splash_page import SplashPage
+from pages.login_page import LoginPage
+from pages.pin_page import PinPage
 from utils.deep_links import DeepLinks
-from conftest import _open_deep_link
+from utils.genuser_fixtures import get_or_create_fixture_user, mark_onboarded
+from conftest import _open_deep_link, _enter_pin
 
 _RUN_DESTRUCTIVE = os.getenv("RUN_DESTRUCTIVE") == "1"
 
@@ -89,225 +99,251 @@ class TestPortfolioAllocationE2E:
 
 
 # --------------------------------------------------------------------------- #
-# Custom portfolio (now "Plus") — entry intro loads.                          #
+# Custom portfolio "PLUS" builder — on the REAL builder, on a PLUS-PLAN user.   #
 # --------------------------------------------------------------------------- #
-@pytest.mark.e2e
-@pytest.mark.portfolio
-class TestCustomPortfolioPlusE2E:
+# The Plus custom-portfolio builder is PLAN-GATED (backend Plan enum
+# starter/regular/plus; POST:/v1/custom_portfolios is gated behind PlusPortfolio,
+# which starter/regular RESTRICT and plus UNLOCKS). Our earlier Plus tests ran on
+# the shared REGULAR-plan account, so they only ever reached the limited/legacy
+# editor and skipped ("Plus intro variant", "Bitcoin category not reachable"), and
+# the old U-ALLOC / RAIZ-10251 conclusion ("no 100% running-total -> not a defect")
+# was drawn on THAT limited editor — NOT the real builder.
+#
+# These tests log in AS the seeded `plan_plus` generated user (own driver +
+# login + onboard, like test_main_value_on_device.py). On a plus user the REAL
+# builder IS reachable, and (VERIFIED live, build 3252) it reconciles correctly:
+# stepping moves 0.5%/tap, Bitcoin clamps at 5.0% and Property at 30.0%, and after
+# saving an allocation the builder rows still sum to 100% (Base Portfolio draws
+# down). So the running-total oracle IS implementable here — and the prior
+# "not a defect" verdict was a REGULAR-PLAN ARTIFACT, not a property of the app.
+#
+# Single shared driver session per class (class-scoped fixture): the login +
+# onboarding + intro carousel is expensive, and this 2GB emulator OOM-kills the
+# app under the per-test churn of repeated relaunches; one session keeps it stable.
+# IMPORTANT: mjpegServerPort is disabled — the screenshot broadcaster is the memory
+# tipping point that OOM-kills the UiAutomator2 instrumentation on this 2GB device.
 
-    INTRO = (AppiumBy.XPATH, "//*[contains(@text,'PLUS') or contains(@text,'successor to the Custom')]")
-    NEXT = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Next']]")
-    BUILDER_HEADER = (AppiumBy.XPATH, "//*[@text='Your Portfolio']")
-    BUILDER_CATEGORY = (AppiumBy.XPATH, "//*[@text='ETFs' or @text='Stocks' or @text='Bitcoin']")
-    BASE_100 = (AppiumBy.XPATH, "//*[@text='100.0%' or @text='100%']")
+_PLUS_UDID = os.getenv("ANDROID_UDID", "emulator-5560")
 
-    # --- Plus builder + per-holding "Customisation" editor controls ---------- #
-    # The builder lists each category (Base Portfolio / ETFs / Stocks / Raiz
-    # Property Fund / Bitcoin) as a clickable row; opening one lands on the
-    # "Customisation" editor with a -/+ stepper (btnDec/btnInc) around an amount
-    # field (etAmount), and a "Save Allocation" CTA. RAIZ-10251 is the interactive
-    # drift/cap defect: the stepper must move the holding by a fixed step, must
-    # never let a single holding exceed its per-asset cap, and the editor total
-    # must stay reconciled to 100% — none of which a read-only sum check can see.
-    APP = "com.acornsau.android.development"
-    BTN_INC = (AppiumBy.ID, f"{APP}:id/btnInc")
-    BTN_DEC = (AppiumBy.ID, f"{APP}:id/btnDec")
-    ET_AMOUNT = (AppiumBy.ID, f"{APP}:id/etAmount")
-    SAVE_ALLOCATION_BTN = (AppiumBy.XPATH, "//android.widget.Button[@text='Save Allocation']")
-    CUSTOMISATION_HEADER = (AppiumBy.XPATH, "//*[@text='Customisation']")
-    # The builder surfaces a running "total allocated" figure (the headline the
-    # reallocation must keep reconciled to 100% — RAIZ-10251). It appears either as
-    # a labelled total ("Total Allocation 100.0%") or, on the editor, as a bare
-    # "NN.N%" near a Total/Allocated caption. We read whatever %-bearing text sits
-    # next to that caption.
-    TOTAL_CAPTION = (AppiumBy.XPATH,
-                     "//android.widget.TextView[contains(@text,'Total') or contains(@text,'Allocated') "
-                     "or contains(@text,'allocated') or contains(@text,'Remaining')]")
-    # The save/commit path is gated on a paid plan for non-Plus accounts.
-    PLAN_GATE = (AppiumBy.XPATH,
-                 "//*[contains(@text,'unavailable on Raiz') or contains(@text,'upgrade your plan') "
-                 "or contains(@text,'upgrade today')]")
-    # Per-holding caps enforced by the builder (RAIZ-10251). Bitcoin is capped at
-    # 5%, the Raiz Property Fund at ~30%; the stepper must clamp at these.
-    BITCOIN_CAP = 5.0
-    PROPERTY_CAP = 30.0
-    STEP = 0.5  # the stepper moves a holding by 0.5% per tap
 
-    def _reach_builder(self, page) -> bool:
-        """Advance past the 'Welcome to PLUS' intro (a couple of Next screens) to
-        the Plus builder. Returns True once the builder header is visible."""
-        for _ in range(4):
-            if page.is_present_now(self.BUILDER_HEADER):
-                return True
-            if page.is_present_now(self.NEXT):
-                page.click(self.NEXT)
-            else:
-                break
-        return page.is_present_now(self.BUILDER_HEADER)
+def _plus_login_and_home(d, fx):
+    """Log into the real app as the plus fixture user and land on Home, running the
+    first-login onboarding gauntlet (incl. the 'Select your Portfolio' intro)."""
+    sp, lo, ho = SplashPage(d), LoginPage(d), HomePage(d)
+    if sp.is_present_now(sp.TAGLINE):
+        sp.tap_log_in()
+    assert lo.is_loaded(timeout=25), "login form did not load"
+    lo.login(fx["email"], fx["password"])
+    time.sleep(7)
 
-    def _open_category(self, page, label: str) -> bool:
-        """From the builder, open a category's Customisation editor by tapping its
-        CLICKABLE CONTAINER (not the bare label). Returns True once the editor
-        (its -/+ stepper) is on screen."""
-        rows = page.driver.find_elements(
-            AppiumBy.XPATH,
-            f"//*[@clickable='true'][.//android.widget.TextView[@text='{label}']]")
-        if not rows:
-            return False
-        rows[-1].click()
-        return page.is_visible(self.ET_AMOUNT, timeout=10)
-
-    def _amount(self, page):
-        """Current value of the holding-amount stepper field, as a float percent."""
-        els = page.driver.find_elements(*self.ET_AMOUNT)
-        if not els:
-            return None
-        raw = (els[0].get_attribute("text") or "").strip().rstrip("%")
-        try:
-            return float(raw)
-        except ValueError:
-            return None
-
-    def _inc_enabled(self, page) -> bool:
-        els = page.driver.find_elements(*self.BTN_INC)
-        return bool(els) and (els[0].get_attribute("enabled") == "true")
-
-    # A %-figure only reads as a WHOLE-PORTFOLIO running total if it sits at/near
-    # 100% (the reconciled headline). Verified against the real app: the reachable
-    # Plus builder variant on a seedable Regular-plan account is the per-fund
-    # AllocationLayout editor (btnInc/btnDec/etAmount), which surfaces only the ONE
-    # holding's weighting — Bitcoin starts at 0.0% — and exposes no reconciled
-    # whole-portfolio "total allocated" widget. So if the only %-values on screen are
-    # small per-holding figures, there is NO running total to assert against.
-    RUNNING_TOTAL_NEAR = 100.0
-    RUNNING_TOTAL_TOL = 2.0
-
-    def _running_total(self, page):
-        """Read the builder's running whole-portfolio 'total allocated' percentage,
-        IF it exposes one. Returns a float percent only when a %-bearing TextView
-        actually reads as a reconciled whole-portfolio total (i.e. sits within
-        RUNNING_TOTAL_TOL of 100%); otherwise returns None so the caller can honestly
-        skip rather than mistaking a per-holding figure (e.g. a 0.0% Bitcoin start)
-        for a portfolio total.
-
-        We scan every standalone 'NN%'/'NN.N%' TextView and keep the one closest to
-        100%; if even that is not near 100%, no whole-portfolio total is on screen."""
-        import re
-        pct_re = re.compile(r"^\d{1,3}(?:\.\d+)?%$")
-        vals = []
-        for el in page.driver.find_elements(
-                AppiumBy.XPATH, "//android.widget.TextView[substring(@text, string-length(@text)) = '%']"):
+    def _texts():
+        out = []
+        for el in d.find_elements(AppiumBy.XPATH,
+                                  "//android.widget.TextView | //android.widget.Button"):
             try:
                 t = (el.get_attribute("text") or "").strip()
             except Exception:
                 continue
-            if pct_re.match(t):
-                try:
-                    vals.append(float(t.rstrip("%")))
-                except ValueError:
-                    pass
-        if not vals:
-            return None
-        best = min(vals, key=lambda v: abs(v - self.RUNNING_TOTAL_NEAR))
-        # Only a value at/near 100% is a whole-portfolio total; a stray per-holding
-        # figure (the editor's own 0.0%/NN.N% holding weight) is NOT a running total.
-        if abs(best - self.RUNNING_TOTAL_NEAR) > self.RUNNING_TOTAL_TOL:
-            return None
-        return best
+            if t:
+                out.append(t)
+        return out
 
-    def _step_up_to_cap(self, page, cap: float, max_taps: int = 80):
-        """Tap the + stepper until it stops moving (clamped) or disables. Returns
-        the final amount. Asserts each tap moves the value by exactly one STEP and
-        never exceeds `cap` — the running per-holding invariant RAIZ-10251 breaks."""
-        import time
-        inc = page.driver.find_elements(*self.BTN_INC)[0]
-        prev = self._amount(page)
-        for _ in range(max_taps):
-            if not self._inc_enabled(page):
+    def _tap(*labels):
+        for lab in labels:
+            els = d.find_elements(
+                AppiumBy.XPATH,
+                f"//*[@clickable='true'][.//*[@text='{lab}']] | //*[@clickable='true' and @text='{lab}'] "
+                f"| //android.widget.Button[@text='{lab}']")
+            if els:
+                els[-1].click()
+                return lab
+        return None
+
+    onboarded = False
+    for _ in range(20):
+        if ho.is_present_now(ho.TOTAL_VALUE_LABEL):
+            break
+        low = " ".join(_texts()).lower()
+        acted = None
+        if "got it" in low or "scroll tabs" in low:
+            acted = _tap("Got it")
+        if not acted and any(s in low for s in ("follow these steps", "link a round-up",
+                                                "complete your raiz invest")):
+            acted = _tap("Continue") or _tap("Skip")
+        if not acted and "select as your portfolio" in low:
+            acted = _tap("Select as your portfolio")
+        if not acted and "select your" in low and "portfolio" in low and "select as" not in low:
+            # the onboarding portfolio-selection intro -> proceed via its bottom CTA
+            btns = d.find_elements(AppiumBy.XPATH, "//android.widget.Button")
+            if btns:
+                btns[-1].click()
+                acted = "intro-CTA"
+        if not acted and ("initial investment" in low or "ready to start investing" in low):
+            acted = _tap("Skip")
+        if not acted:
+            acted = _tap("Skip", "Continue", "Confirm", "Done", "Next")
+        if not acted:
+            break
+        onboarded = True
+        time.sleep(4)
+    if onboarded:
+        mark_onboarded(fx["key"])
+    assert ho.is_loaded(timeout=25), "not on Home after login"
+    return ho
+
+
+@pytest.mark.e2e
+@pytest.mark.portfolio
+@pytest.mark.genuser_e2e
+@pytest.mark.skipif(not _RUN_DESTRUCTIVE,
+                    reason="Plus builder edits/saves a real portfolio; gated on RUN_DESTRUCTIVE=1")
+class TestCustomPortfolioPlusE2E:
+    """The REAL Plus custom-portfolio builder, exercised on the seeded `plan_plus`
+    generated user (plan=plus). RAIZ-10251 interactive drift/cap + reconciliation."""
+
+    BITCOIN_CAP = PlusBuilderPage.BITCOIN_CAP
+    PROPERTY_CAP = PlusBuilderPage.PROPERTY_CAP
+    STEP = PlusBuilderPage.STEP
+
+    @pytest.fixture(scope="class")
+    def plus_driver(self):
+        """One logged-in plus-user session for the whole class (login + onboarding
+        is expensive and the 2GB emulator OOM-kills the app under per-test relaunch
+        churn). Clears app data once (fresh credential login, no PIN gate) and
+        disables the MJPEG broadcaster (the OOM tipping point on this device).
+
+        The UiAutomator2 instrumentation can be lowmemorykilled mid-login on this
+        2GB emulator under host memory pressure (a transient infra crash, not a test
+        failure); retry the whole session create + login once before giving up."""
+        from selenium.common.exceptions import WebDriverException
+        fx = get_or_create_fixture_user("plan_plus")
+
+        def _build():
+            opts = get_android_options(no_reset=False)
+            opts.udid = _PLUS_UDID
+            opts.set_capability("adbExecTimeout", 120000)
+            opts.set_capability("appWaitDuration", 60000)
+            opts.set_capability("uiautomator2ServerLaunchTimeout", 120000)
+            opts.set_capability("mjpegServerPort", 0)
+            return appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
+
+        d = None
+        last_exc = None
+        for attempt in range(3):
+            try:
+                d = _build()
+                _plus_login_and_home(d, fx)
                 break
-            inc.click()
-            time.sleep(0.2)
-            cur = self._amount(page)
-            assert cur is not None, "stepper amount became unreadable mid-edit"
-            # Never exceed the cap at any step (the drift defect would overshoot).
-            assert cur <= cap + 1e-6, \
-                f"holding exceeded its {cap}% cap during editing: reached {cur}%"
-            if cur == prev:
-                break  # clamped: further taps no longer move the value
-            # Each effective tap moves by exactly one step (no silent drift).
-            assert abs(cur - prev - self.STEP) < 1e-6, \
-                f"stepper jumped {prev}% -> {cur}% (expected +{self.STEP}% per tap)"
-            prev = cur
-        return self._amount(page)
+            except WebDriverException as exc:
+                last_exc = exc
+                if d is not None:
+                    try:
+                        d.quit()
+                    except Exception:
+                        pass
+                    d = None
+                # let the lowmemorykilled instrumentation + app fully tear down and
+                # the device reclaim RAM before retrying (longer each attempt)
+                time.sleep(8 * (attempt + 1))
+        if d is None:
+            raise last_exc
+        try:
+            yield d
+        finally:
+            try:
+                d.quit()
+            except Exception:
+                pass
 
-    def test_plus_entry_loads(self, driver):
-        """raiz://portfolio/custom opens either the 'Welcome to PLUS' intro or the
-        Plus builder. Accept either."""
-        _open_deep_link(driver, DeepLinks.PORTFOLIO_CUSTOM)
-        page = BasePage(driver)
-        intro = page.is_visible(self.INTRO, timeout=2)
-        builder = page.is_present_now(self.BUILDER_HEADER) and page.is_present_now(self.BUILDER_CATEGORY)
-        assert intro or builder, "Expected the Plus intro or the Plus builder to load"
+    def _open_builder(self, plus_driver) -> PlusBuilderPage:
+        """Deep-link to the Plus builder and dismiss the 'Welcome to PLUS' intro,
+        returning the loaded builder page. The session is shared across tests, so
+        re-open from scratch each time.
 
-    def test_plus_base_portfolio_starts_at_100_percent(self, driver):
-        """In the Plus builder, the base portfolio must be weighted 100% before
-        the user reallocates — the starting invariant behind RAIZ-10251. Taps
-        through the intro to reach the builder."""
-        _open_deep_link(driver, DeepLinks.PORTFOLIO_CUSTOM)
-        page = BasePage(driver)
-        if not self._reach_builder(page):
-            pytest.skip("Plus intro variant shown; builder not reachable via Next this run")
-        assert page.is_present_now(self.BASE_100), "Base portfolio should start weighted at 100%"
+        Resilient to an OOM-kill of the app mid-class (this 2GB emulator can
+        lowmemorykill the app under cumulative session load): if the builder isn't
+        reachable on the first deep link, relaunch the app + re-auth and retry once
+        before failing."""
+        page = PlusBuilderPage(plus_driver)
+        for attempt in range(2):
+            DeepLinks.open(plus_driver, DeepLinks.PORTFOLIO_CUSTOM)
+            time.sleep(3)
+            pin = PinPage(plus_driver)
+            if pin.is_loaded(timeout=2):
+                _enter_pin(pin, plus_driver)
+                time.sleep(2)
+            # clear a leftover transient 'Oops' save-error dialog from a prior test
+            page._dismiss_oops()
+            if page.dismiss_intro():
+                # the header can paint before the category rows populate; wait for
+                # the full row set so callers reading weightings don't under-count
+                page.wait_rows_loaded()
+                return page
+            # not on the builder — the app may have been killed; relaunch + recover
+            if attempt == 0:
+                try:
+                    plus_driver.activate_app("com.acornsau.android.development")
+                except Exception:
+                    pass
+                time.sleep(5)
+                pin = PinPage(plus_driver)
+                if pin.is_loaded(timeout=3):
+                    _enter_pin(pin, plus_driver)
+                    time.sleep(2)
+                HomePage(plus_driver).is_loaded(timeout=20)
+        ts = []
+        for el in plus_driver.find_elements(AppiumBy.XPATH,
+                                            "//android.widget.TextView | //android.widget.Button"):
+            try:
+                t = (el.get_attribute("text") or "").strip()
+            except Exception:
+                continue
+            if t:
+                ts.append(t)
+        raise AssertionError(
+            "could not reach the Plus builder 'Your Portfolio' screen on a "
+            f"plus-plan user; screen showed: {ts[:25]}")
 
-    # --- RAIZ-10251 INTERACTIVE drift/cap (editing flow) --------------------- #
-    # The original class only read the static BASE_100 start. These exercise the
-    # actual reallocation: stepping a holding, the per-tap step invariant, the
-    # per-holding caps clamping, and what happens when you try to commit. They
-    # catch the interactive drift/cap defect a read-only sum check cannot.
+    # ----------------------------------------------------------------------- #
+    def test_plus_builder_loads_on_plus_plan(self, plus_driver):
+        """On a PLUS-plan user, raiz://portfolio/custom reaches the REAL builder
+        ('Your Portfolio' with its category rows) — not the limited intro variant a
+        regular-plan account is stuck on. This is the precondition the old tests
+        could never satisfy on the shared regular account."""
+        page = self._open_builder(plus_driver)
+        assert page.is_loaded(), "Plus builder header not visible"
+        weights = page.category_weightings()
+        assert weights, "builder showed no weighted category rows"
+        # At least the Base Portfolio row must be present and weighted.
+        assert any("Base Portfolio" in k for k in weights), \
+            f"expected a 'Base Portfolio' row in the builder, got {list(weights)}"
 
-    def _reach_builder_or_skip(self, driver) -> "BasePage":
-        _open_deep_link(driver, DeepLinks.PORTFOLIO_CUSTOM)
-        page = BasePage(driver)
-        if not self._reach_builder(page):
-            pytest.skip("Plus intro variant shown; builder not reachable via Next this run")
-        return page
+    def test_plus_base_portfolio_starts_at_100_percent(self, plus_driver):
+        """The builder's whole-portfolio weighting starts reconciled at 100% (the
+        Base Portfolio carries the full weight before any reallocation) — the
+        starting invariant behind RAIZ-10251."""
+        page = self._open_builder(plus_driver)
+        total = page.running_total()
+        assert total is not None, "no weighted rows on the builder to total"
+        assert total == pytest.approx(100.0, abs=0.5), \
+            f"builder should start reconciled at 100%, got {total}% from {page.category_weightings()}"
 
-    def _tap_inc_expect(self, page, prev):
-        """Tap + once and wait for the amount to advance by exactly one step. On a slow
-        emulator the + tap can be SWALLOWED (it registers before the Compose amount field
-        re-renders), leaving the value unchanged — a deterministic non-drift flake. Re-tap
-        ONCE and poll for the advance. Returns the new amount once it has moved by ~STEP,
-        or the last-read value if it never moved (so a genuine wrong-step drift still
-        fails the caller's exact-step assertion, while a swallowed tap is absorbed)."""
-        import time as _t
-        for _ in range(2):
-            page.click(self.BTN_INC)
-            waited = 0.0
-            while waited < 3.0:
-                cur = self._amount(page)
-                if cur is not None and cur >= prev + self.STEP - 1e-6:
-                    return cur
-                _t.sleep(0.3)
-                waited += 0.3
-        return self._amount(page)
-
-    def test_reallocating_a_holding_steps_without_drift(self, driver):
-        """Open a holding's Customisation editor and reallocate it UP with the +
-        stepper. Each effective tap must move the holding by exactly one 0.5% step
-        with no silent drift, and the value must never exceed the holding's cap —
-        the running per-holding invariant behind RAIZ-10251. Reads the live amount
-        field after every tap (a true editing assertion, not a static sum)."""
-        page = self._reach_builder_or_skip(driver)
-        if not self._open_category(page, "Bitcoin"):
-            pytest.skip("Bitcoin category not reachable in the Plus builder this run")
-        start = self._amount(page)
+    def test_reallocating_a_holding_steps_without_drift(self, plus_driver):
+        """Open Bitcoin's Customisation editor and step it UP. Each effective tap
+        moves the holding by exactly one 0.5% step with no silent drift, and never
+        exceeds the holding's cap — the per-holding invariant behind RAIZ-10251.
+        Reads the live amount field after every tap (a true editing assertion)."""
+        page = self._open_builder(plus_driver)
+        assert page.open_category("Bitcoin"), "Bitcoin category not reachable in the Plus builder"
+        # Reset to a known 0.0% floor first so the step-up is clean regardless of any
+        # weight saved on a prior run (the session/portfolio is reused).
+        start = page.reset_to_zero()
         assert start is not None, "could not read the holding-amount field in the editor"
-        # A few clean steps from the start, each verified to move exactly one step.
-        # _tap_inc_expect re-taps a swallowed tap and polls for the advance, so a genuine
-        # wrong-step DRIFT still fails below while a slow-emulator missed tap does not.
+        assert start == pytest.approx(0.0, abs=1e-6), \
+            f"expected Bitcoin to reset to 0% before stepping, got {start}%"
         prev = start
         for n in range(1, 5):
-            cur = self._tap_inc_expect(page, prev)
+            cur = page.tap_inc_expect(prev)
             assert cur is not None, "amount field unreadable after a + tap"
             assert abs(cur - prev - self.STEP) < 1e-6, \
                 f"reallocation step {n} drifted: {prev}% -> {cur}% (expected +{self.STEP}%)"
@@ -315,103 +351,85 @@ class TestCustomPortfolioPlusE2E:
                 f"holding overshot its {self.BITCOIN_CAP}% cap while editing: {cur}%"
             prev = cur
         assert prev == pytest.approx(start + 4 * self.STEP, abs=1e-6), \
-            f"after 4 steps the holding should be {start + 4*self.STEP}%, got {prev}%"
+            f"after 4 steps the holding should be {start + 4 * self.STEP}%, got {prev}%"
 
-    def test_running_total_stays_100_during_reallocation(self, driver):
-        """RAIZ-10251 (the core drift defect): as you reallocate ONE holding up, the
-        builder's running whole-portfolio total must stay reconciled to 100% at
-        every step — adding to one holding has to draw down others, never letting
-        the total drift off 100%. We open a holding, read the running total before
-        any edit (sanity: it must START at 100%), then step the holding up and
-        re-read the running total after each tap, asserting it never leaves 100%.
-
-        If this builder variant doesn't surface a running total, that sub-assertion
-        can't be made on a seedable account -> skip (reported as infra-gated)
-        rather than faked."""
-        page = self._reach_builder_or_skip(driver)
-        if not self._open_category(page, "Bitcoin"):
-            pytest.skip("Bitcoin category not reachable in the Plus builder this run")
-        start_total = self._running_total(page)
-        if start_total is None:
-            pytest.skip(
-                "No whole-portfolio running total observable: the reachable Plus "
-                "builder on a seedable Regular-plan account is the per-fund "
-                "AllocationLayout editor (btnInc/btnDec/etAmount), which shows only "
-                "the single holding's weight (Bitcoin starts at 0.0%) and surfaces no "
-                "reconciled 'total allocated' headline. The RAIZ-10251 running-total "
-                "oracle needs a builder variant that displays a whole-portfolio total "
-                "(infra-gated: no Plus-seed recipe — funded_user hardcodes "
-                "plan_identifier='regular')")
-        assert start_total == pytest.approx(100.0, abs=0.5), \
-            f"reallocation should start from a 100% total, builder showed {start_total}%"
-        import time as _t
-        for n in range(1, 5):
-            if not self._inc_enabled(page):
-                break  # clamped at the holding cap before we ran out of steps
-            page.click(self.BTN_INC)
-            _t.sleep(0.2)
-            total = self._running_total(page)
-            assert total is not None, "running total became unreadable mid-edit"
-            assert total == pytest.approx(100.0, abs=0.5), (
-                f"running total drifted off 100% after reallocation step {n} "
-                f"(RAIZ-10251): showed {total}%")
-
-    def test_bitcoin_holding_clamped_at_5_percent(self, driver):
+    def test_bitcoin_holding_clamped_at_5_percent(self, plus_driver):
         """RAIZ-10251 cap: the Bitcoin holding cannot be reallocated above 5%.
-        Stepping past the cap must clamp the value at exactly 5.0% and disable the
-        + control rather than letting the weighting drift over its limit."""
-        page = self._reach_builder_or_skip(driver)
-        if not self._open_category(page, "Bitcoin"):
-            pytest.skip("Bitcoin category not reachable in the Plus builder this run")
-        final = self._step_up_to_cap(page, self.BITCOIN_CAP)
+        Stepping past the cap clamps at exactly 5.0% and disables the + control."""
+        page = self._open_builder(plus_driver)
+        assert page.open_category("Bitcoin"), "Bitcoin category not reachable in the Plus builder"
+        final = page.step_up_to_cap(self.BITCOIN_CAP)
         assert final == pytest.approx(self.BITCOIN_CAP, abs=1e-6), \
             f"Bitcoin should clamp at {self.BITCOIN_CAP}%, ended at {final}%"
-        assert not self._inc_enabled(page), \
+        assert not page.inc_enabled(), \
             "the + control should be disabled at the Bitcoin cap, but it is still enabled"
 
-    def test_raiz_property_holding_clamped_at_30_percent(self, driver):
+    def test_raiz_property_holding_clamped_at_30_percent(self, plus_driver):
         """RAIZ-10251 cap: the Raiz Property Fund holding cannot be reallocated
-        above ~30%. Stepping past the cap must clamp at exactly 30.0% and disable
-        the + control."""
-        page = self._reach_builder_or_skip(driver)
-        if not self._open_category(page, "Raiz Property Fund"):
-            pytest.skip("Raiz Property Fund category not reachable in the Plus builder this run")
-        final = self._step_up_to_cap(page, self.PROPERTY_CAP)
+        above 30%. Stepping past the cap clamps at exactly 30.0% and disables +."""
+        page = self._open_builder(plus_driver)
+        assert page.open_category("Raiz Property Fund"), \
+            "Raiz Property Fund category not reachable in the Plus builder"
+        final = page.step_up_to_cap(self.PROPERTY_CAP)
         assert final == pytest.approx(self.PROPERTY_CAP, abs=1e-6), \
             f"Raiz Property Fund should clamp at {self.PROPERTY_CAP}%, ended at {final}%"
-        assert not self._inc_enabled(page), \
+        assert not page.inc_enabled(), \
             "the + control should be disabled at the Property cap, but it is still enabled"
 
-    def test_saving_a_custom_allocation_is_gated(self, driver):
-        """Committing a Plus allocation must NOT silently persist an off-spec
-        portfolio. On a Raiz Regular-plan account (the only kind the test-data API
-        seeds — every builder uses plan_identifier='regular', and there is no Plus/
-        Pro seed recipe), the save is BLOCKED behind a plan-upgrade gate rather
-        than going through. We reallocate a holding, tap Save Allocation, and
-        assert the plan-gate appears (the commit is blocked) instead of a success.
+    def test_running_total_stays_100_after_reallocation(self, plus_driver):
+        """RAIZ-10251 (the core 'totals must add up' defect): saving a reallocation
+        keeps the whole-portfolio total reconciled to 100%. Adding weight to one
+        holding has to draw the Base Portfolio DOWN by the same amount, never letting
+        the total drift off 100%.
 
-        NOTE: this proves the commit is gated, which is the observable 'save is
-        blocked' behaviour on a seedable account. Proving a save is blocked
-        *specifically because the total != 100%* needs a Plus/Pro-plan account,
-        which no seed recipe produces -> reported as infra-gated (items_blocked),
-        not faked here."""
-        page = self._reach_builder_or_skip(driver)
-        if not self._open_category(page, "Bitcoin"):
-            pytest.skip("Bitcoin category not reachable in the Plus builder this run")
-        # Make a real edit so we are committing a modified allocation.
-        page.click(self.BTN_INC)
-        import time as _t
-        _t.sleep(0.3)
-        assert self._amount(page) and self._amount(page) > 0, \
-            "precondition: the holding should be reallocated above 0% before saving"
-        if not page.is_present_now(self.SAVE_ALLOCATION_BTN):
-            pytest.skip("Save Allocation control not present in this editor variant")
-        page.click(self.SAVE_ALLOCATION_BTN)
-        # The commit is blocked behind the plan-upgrade gate on a Regular account.
-        assert page.is_visible(self.PLAN_GATE, timeout=10), (
-            "Saving a Plus allocation on a Regular-plan account should be blocked "
-            "by a plan-upgrade gate; no gate appeared (commit may have gone through "
-            "unexpectedly, or the account is on a Plus plan)")
+        VERIFIED behaviour: open Bitcoin, step it up a few steps, Save Allocation,
+        and the builder rows (Base Portfolio + Bitcoin + ...) still sum to 100%.
+        On the regular-plan limited editor there was no reconciled total to observe
+        at all — that absence, not a real 100% headline, was what the old test saw,
+        so the prior 'not a defect' verdict was a regular-plan artifact. Here the
+        real builder DOES reconcile, so we assert it holds (a true drift would fail)."""
+        page = self._open_builder(plus_driver)
+        before = page.running_total()
+        assert before == pytest.approx(100.0, abs=0.5), \
+            f"builder should start at 100%, got {before}"
+        assert page.open_category("Bitcoin"), "Bitcoin category not reachable in the Plus builder"
+        # Reset to 0% first so the edit is a clean, known delta regardless of any
+        # weight saved on a prior run.
+        start = page.reset_to_zero()
+        assert start == pytest.approx(0.0, abs=1e-6), \
+            f"expected Bitcoin to reset to 0% before reallocating, got {start}%"
+        # Step Bitcoin UP until the Save button enables — it only enables once the
+        # value differs from the last SAVED allocation (so re-landing on the saved
+        # value would leave it disabled). Stop at the cap. This guarantees a genuine,
+        # saveable change regardless of what a prior run persisted.
+        prev = start
+        for _ in range(int(self.BITCOIN_CAP / self.STEP)):
+            if not page.inc_enabled():
+                break
+            prev = page.tap_inc_expect(prev)
+            # the enabled state can lag the tap; poll it for a beat before deciding
+            if page.save_enabled(wait=2.0):
+                break
+        edited = page.amount()
+        assert edited is not None and edited > start, \
+            f"precondition: Bitcoin should be reallocated above its start ({start}%), got {edited}%"
+        assert page.save_enabled(wait=3.0), \
+            f"precondition: Save should be enabled after changing Bitcoin to {edited}%"
+        assert page.save_allocation(), "Save Allocation did not return to the builder"
+        # Back on the builder: wait for the rows to repopulate, then assert they
+        # still reconcile to 100%.
+        page.wait_rows_loaded()
+        after = page.running_total()
+        weights = page.category_weightings()
+        assert after is not None, "no weighted rows after saving the allocation"
+        assert after == pytest.approx(100.0, abs=0.5), (
+            f"running total drifted off 100% after reallocation (RAIZ-10251): "
+            f"showed {after}% from {weights}")
+        # And the edit really took: a non-base holding now carries a positive weight,
+        # while Base drew down below 100% — i.e. the reconciliation rebalanced.
+        base = next((v for k, v in weights.items() if "Base Portfolio" in k), None)
+        assert base is not None and base < 100.0, \
+            f"Base Portfolio should have drawn down below 100% after the edit, got {base}% ({weights})"
 
 
 # --------------------------------------------------------------------------- #

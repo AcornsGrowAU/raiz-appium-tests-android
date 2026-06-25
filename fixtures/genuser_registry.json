@@ -73,10 +73,10 @@
   },
   "six_jars_cap": {
     "key": "six_jars_cap",
-    "email": "fixture.six_jars_cap.1782271274@emel.xyz",
+    "email": "fixture.six_jars_cap.1782274954@emel.xyz",
     "password": "Pass1234",
-    "user_id": 42107,
-    "created_at": 1782271276,
+    "user_id": 42289,
+    "created_at": 1782275021,
     "onboarded": false,
     "reused": false
   },
@@ -190,11 +190,11 @@
   },
   "plan_plus": {
     "key": "plan_plus",
-    "email": "fixture.plan_plus.1782271293@emel.xyz",
+    "email": "fixture.plan_plus.1782281371@emel.xyz",
     "password": "Pass1234",
-    "user_id": 42146,
-    "created_at": 1782271293,
-    "onboarded": false,
+    "user_id": 42567,
+    "created_at": 1782281380,
+    "onboarded": true,
     "reused": false
   },
   "myfinance_unlinked": {
