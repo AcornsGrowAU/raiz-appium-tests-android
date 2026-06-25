@@ -41,16 +41,23 @@ class PinPage(BasePage):
         return self.is_visible(self.TITLE, timeout=timeout)
 
     def enter_pin(self, pin: str):
-        # The PIN keypad is a Compose grid that can recompose between locating a
-        # key and clicking it (e.g. right after the screen appears), throwing a
-        # StaleElementReferenceException. Retry the individual key once so a
-        # transient recomposition doesn't abort the whole login.
-        from selenium.common.exceptions import StaleElementReferenceException
+        # The PIN keypad is a Compose grid that (a) can render a beat AFTER the
+        # 'Enter your PIN' title appears (so the first key tap can miss, especially
+        # under memory pressure) and (b) can recompose between locating a key and
+        # clicking it (StaleElementReferenceException). Wait for the keypad to
+        # exist first, then click each digit, retrying on a transient recomposition
+        # (stale) or a not-yet-laid-out key (timeout) so a slow render doesn't
+        # abort login.
+        from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+        self.is_present(self._KEY_MAP["1"], timeout=DEFAULT_WAIT)
         for digit in pin:
-            try:
-                self.click(self._KEY_MAP[digit])
-            except StaleElementReferenceException:
-                self.click(self._KEY_MAP[digit])
+            for attempt in range(3):
+                try:
+                    self.click(self._KEY_MAP[digit])
+                    break
+                except (StaleElementReferenceException, TimeoutException):
+                    if attempt == 2:
+                        raise
 
     def tap_key(self, digit: str):
         """Tap a single keypad digit (stale-safe, like enter_pin)."""

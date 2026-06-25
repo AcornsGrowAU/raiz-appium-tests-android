@@ -81,3 +81,106 @@ class KidsPage(BasePage):
             AppiumBy.XPATH, "//android.widget.TextView[contains(@text, 'yr')]"
         )
         return [el.text for el in elements]
+
+    def _scroll_name_into_view(self, name: str) -> None:
+        """Best-effort scroll the kid row whose name contains `name` into view, so
+        a kid below the fold is rendered before we read its card (the list
+        recycles off-screen rows). The kid label renders as 'Name LastName (<1yr)';
+        scroll to the first-name token which is always on-screen text."""
+        try:
+            self.scroll_to_top()
+        except Exception:
+            pass
+        try:
+            self.scroll_to_text(name)
+        except Exception:
+            pass
+
+    def get_kid_value_by_name(self, name: str) -> str | None:
+        """Name-scoped kid balance getter.
+
+        Return the well-formed money string rendered INSIDE the kid card/row whose
+        own text contains `name`, or None if that kid's row renders no amount.
+        Reading within the matched row (not the whole screen, and not a broad
+        wrapper that spans every sibling) is what isolates one sibling's value from
+        the other's — the suite's known presence-only weakness is that a
+        screen-wide '$' scrape can't tell two kids apart.
+
+        IMPORTANT — why we pick the TIGHTEST container, not the first match:
+        XPath `find_elements` returns ancestors BEFORE descendants in document
+        order. A naive `//android.view.View[@clickable='true'][.//TextView[name]]`
+        therefore matches the OUTER list/card wrapper first — and that wrapper also
+        contains EVERY sibling's money TextView, so `_first_money_in` would return
+        the first money on screen (kid-A's) for *every* name queried. That is the
+        exact failure where both kid cards report kid-A's balance. To isolate the
+        row, we choose, among the containers that hold this name, the one with the
+        FEWEST 'yr' name TextViews (i.e. the tightest row that wraps exactly this
+        one kid — never a multi-kid wrapper), and read the money nearest the name
+        within it."""
+        self._scroll_name_into_view(name)
+        # All View ancestors that contain this kid's name AND at least one money
+        # TextView. We then narrow to the tightest single-kid row below.
+        candidates = self.driver.find_elements(
+            AppiumBy.XPATH,
+            f"//android.view.View[.//android.widget.TextView[contains(@text, {self._xq(name)})]"
+            f" and .//android.widget.TextView[contains(@text, '$')]]",
+        )
+        best = None  # (kid_name_count, money) — minimise kid_name_count
+        for c in candidates:
+            kid_name_count = self._kid_name_count_in(c)
+            if kid_name_count == 0:
+                continue
+            money = self._money_for_name_in(c, name)
+            if money is None:
+                continue
+            if best is None or kid_name_count < best[0]:
+                best = (kid_name_count, money)
+                if kid_name_count == 1:
+                    # Tightest possible: a container scoped to exactly this kid.
+                    return money
+        return best[1] if best else None
+
+    def _kid_name_count_in(self, container) -> int:
+        """Number of kid-name TextViews ('… (<age>yr)') inside a container. A
+        single-kid row has exactly 1; a multi-kid wrapper has >1. Lets us reject
+        broad wrappers that would leak a sibling's value."""
+        return len(container.find_elements(
+            AppiumBy.XPATH, ".//android.widget.TextView[contains(@text, 'yr')]"))
+
+    def _money_for_name_in(self, container, name: str) -> str | None:
+        """The money string belonging to `name` within `container`.
+
+        When the container wraps only this kid, any money inside is this kid's.
+        When it (still) wraps more than one kid, pick the money TextView that
+        directly follows this kid's name TextView in document order, so we don't
+        return a sibling's amount that happens to appear first."""
+        tvs = container.find_elements(
+            AppiumBy.XPATH, ".//android.widget.TextView[string-length(@text) > 0]")
+        seen_name = False
+        for tv in tvs:
+            txt = tv.text or ""
+            if name in txt:
+                seen_name = True
+            if seen_name and is_money(txt):
+                return txt
+        # Name not followed by money (recycler quirk): fall back to first money.
+        for tv in tvs:
+            if is_money(tv.text or ""):
+                return tv.text
+        return None
+
+    def _first_money_in(self, container) -> str | None:
+        for tv in container.find_elements(
+                AppiumBy.XPATH, ".//android.widget.TextView[string-length(@text) > 0]"):
+            if is_money(tv.text):
+                return tv.text
+        return None
+
+    @staticmethod
+    def _xq(text: str) -> str:
+        """Quote a string for an XPath literal, handling embedded apostrophes via
+        concat() so kid names with quotes don't break the selector."""
+        if "'" not in text:
+            return f"'{text}'"
+        parts = text.split("'")
+        return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"

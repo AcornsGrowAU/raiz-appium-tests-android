@@ -147,8 +147,10 @@ class TestLumpSumInvestmentE2E:
 class TestWithdrawE2E:
 
     def test_available_balance_is_well_formed(self, withdraw):
-        """The withdraw screen must show a real 'Available:' figure, not a blank."""
-        text = withdraw.get_text(withdraw.AVAILABLE_BALANCE)
+        """The withdraw screen must show a real 'Available:' figure, not a blank.
+        The live balance fills in a beat late, so read it via the polling helper
+        rather than a single snapshot that can catch the bare 'Available:' label."""
+        text = withdraw.get_available_balance()
         assert is_money(text), f"Available balance should be a dollar amount, got {text!r}"
 
     @pytest.mark.edge
@@ -163,7 +165,7 @@ class TestWithdrawE2E:
         enforced at the keypad→confirmation gate; enforcement is at final confirm
         or server-side (unverified — we do not commit). See TEST_SUITE_ANALYSIS.md.
         We cancel immediately so nothing is submitted."""
-        available = parse_money(withdraw.get_text(withdraw.AVAILABLE_BALANCE))
+        available = parse_money(withdraw.get_available_balance())
         over = str(int(available) + 100000)
         withdraw.enter_amount(over)
         withdraw.tap_withdraw()
@@ -179,7 +181,7 @@ class TestWithdrawE2E:
         """Small valid withdrawal → confirmation → Cancel. DEFENSIVE: if the
         withdraw confirmation copy differs from Invest's 'Nice!', this assertion
         is the first thing to retune after an on-device run."""
-        available = parse_money(withdraw.get_text(withdraw.AVAILABLE_BALANCE))
+        available = parse_money(withdraw.get_available_balance())
         if available < 5:
             pytest.skip(f"Test account has insufficient balance to withdraw (${available})")
         withdraw.enter_amount("5")

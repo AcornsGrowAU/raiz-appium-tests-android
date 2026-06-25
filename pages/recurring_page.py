@@ -1,5 +1,7 @@
+import time
+
 from appium.webdriver.common.appiumby import AppiumBy
-from config.settings import DEFAULT_WAIT
+from config.settings import DEFAULT_WAIT, POLL_INTERVAL
 from pages.base_page import BasePage
 
 
@@ -56,9 +58,29 @@ class RecurringPage(BasePage):
         Presence-checked here; the value check lives in is_current_balance_well_formed."""
         return self.is_visible(self.FREQUENCY, timeout=timeout)
 
-    def get_current_balance_text(self) -> str:
-        """Return the raw 'Current balance: $X' text from the setup screen."""
-        return self.get_text(self.CURRENT_BALANCE)
+    def get_current_balance_text(self, timeout=DEFAULT_WAIT) -> str:
+        """Return the raw 'Current balance: $X' text from the setup screen.
+
+        The balance is market-priced and loaded asynchronously, so on a slow
+        emulator the row can render first as a placeholder (e.g. '$0.00' or a
+        blank '$') and update to the real value a beat later. We poll until the
+        rendered text carries a *positive* dollar value (or the timeout lapses,
+        in which case we hand back whatever is on screen so the caller's value
+        assertion fails against reality rather than against a loading frame)."""
+        from utils.assertions import parse_money
+        deadline = time.time() + timeout
+        last = self.get_text(self.CURRENT_BALANCE)  # waits for the row to exist
+        while time.time() < deadline:
+            try:
+                if parse_money(last) > 0:
+                    return last
+            except AssertionError:
+                pass  # no money token yet (placeholder) — keep polling
+            time.sleep(POLL_INTERVAL)
+            if not self.is_present_now(self.CURRENT_BALANCE):
+                break
+            last = self.driver.find_elements(*self.CURRENT_BALANCE)[0].text
+        return last
 
     def save_button_size(self):
         """(width, height) in px of the Save button, or None if absent/hidden.
@@ -70,9 +92,20 @@ class RecurringPage(BasePage):
             return None
         return parse_bounds(els[0].get_attribute("bounds"))
 
-    def is_save_button_well_rendered(self, min_w=200, min_h=40) -> bool:
+    def is_save_button_well_rendered(self, min_w=200, min_h=40, timeout=DEFAULT_WAIT) -> bool:
         """Save must be displayed at a usable tap-target size — guards RAIZ-9909
         ('Save button obstructed and small'). Does not require it to be enabled
-        (it's disabled until an amount/frequency are entered)."""
-        size = self.save_button_size()
-        return size is not None and size[0] >= min_w and size[1] >= min_h
+        (it's disabled until an amount/frequency are entered).
+
+        The form settles/animates into place after it opens, so a single bounds
+        read can catch the button mid-layout at a transient zero/small size. We
+        poll until it measures at a usable size (returning early on success);
+        only a button that stays small for the whole window is a real defect."""
+        deadline = time.time() + timeout
+        while True:
+            size = self.save_button_size()
+            if size is not None and size[0] >= min_w and size[1] >= min_h:
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(POLL_INTERVAL)

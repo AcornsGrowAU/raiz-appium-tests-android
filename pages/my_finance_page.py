@@ -84,6 +84,12 @@ class MyFinancePage(BasePage):
         """Dollar figure shown under 'Total in Superannuation' ($0 when unfunded)."""
         return self._value_near(self.TOTAL_IN_SUPER)
 
+    def get_net_worth_total_text(self) -> str:
+        """The aggregate 'My net worth' dollar figure (the headline total the
+        investments + super components must add up to). Paired geometrically to
+        the 'My net worth' header, same as the component figures."""
+        return self._value_near(self.NET_WORTH_HEADER)
+
     def get_category_spending_amounts(self) -> list[str]:
         """Well-formed money figures that belong to the Category Spending section,
         i.e. those rendered BELOW the 'Category Spending' header and ABOVE the next
@@ -134,21 +140,106 @@ class MyFinancePage(BasePage):
         from utils.assertions import parse_money
         return [parse_money(t) for t in self.get_money_texts()]
 
-    def wait_for_net_worth(self, timeout=12) -> list[float]:
-        """Poll until the net-worth figures populate (investments goes positive).
-        The screen renders its title before the totals load, so an immediate read
-        can catch $0 placeholders. Returns the parsed values once a positive one
-        appears, or the last read on timeout."""
+    def net_worth_components_ready(self) -> bool:
+        """True once the 'My net worth' card has rendered its COMPONENT rows: the
+        header and BOTH component labels are present AND both geometrically-paired
+        component figures ('Total in investments' / 'Total in Superannuation')
+        read as well-formed money.
+
+        This is the load gate the reconciliation test depends on. It does NOT
+        require the headline net-worth figure, because on the current app build
+        the card renders the header label and the two component rows but exposes
+        no separate headline dollar figure on the header row (verified on-device
+        emulator-5558, build's My Finance layout: only '$1,578.14' for
+        investments and '$0' for super are present near the card; the 'My net
+        worth' header has no '$' sibling within a row's height). Gating on a
+        screen-wide 'any positive figure' check is too loose — an unrelated
+        figure elsewhere (e.g. Monthly tracker) can satisfy it while these
+        component rows are still placeholders."""
+        from utils.assertions import is_money
+        if not (self.is_present_now(self.NET_WORTH_HEADER)
+                and self.is_present_now(self.TOTAL_IN_INVESTMENTS)
+                and self.is_present_now(self.TOTAL_IN_SUPER)):
+            return False
+        return (is_money(self.get_investments_total_text())
+                and is_money(self.get_super_total_text()))
+
+    def net_worth_card_ready(self) -> bool:
+        """Backwards-compatible: True once the card's component rows are fully
+        populated (see net_worth_components_ready)."""
+        return self.net_worth_components_ready()
+
+    def has_net_worth_headline(self) -> bool:
+        """True if the card exposes a headline 'My net worth' dollar figure on the
+        header row (some builds render only the component rows and no separate
+        headline total — in which case the headline reconciliation is not
+        applicable and callers should skip rather than fail)."""
+        from utils.assertions import is_money
+        return is_money(self.get_net_worth_total_text())
+
+    def get_component_totals(self) -> list[str]:
+        """Well-formed money figures of the net-worth card's component rows, i.e.
+        the figures rendered BELOW the 'My net worth' header and ABOVE the next
+        section ('Category Spending'). Geometric pairing (UiAutomator2 rejects the
+        `following::` axis). Returns the raw figure texts for the rows that
+        actually appear, so a build with extra components (cash/other) reconciles
+        against all of them, not just investments + super."""
+        from utils.assertions import is_money
+        headers = self.driver.find_elements(*self.NET_WORTH_HEADER)
+        if not headers:
+            return []
+        top = self._y_center(headers[0])
+        if top is None:
+            return []
+        bottom = float("inf")
+        for nxt in self.driver.find_elements(*self.CATEGORY_SPENDING):
+            y = self._y_center(nxt)
+            if y is not None and y > top:
+                bottom = min(bottom, y)
+        amounts = []
+        for el in self.driver.find_elements(*self._MONEY_TEXTVIEWS):
+            try:
+                txt = el.text
+                if not is_money(txt):
+                    continue
+                y = self._y_center(el)
+            except (StaleElementReferenceException, WebDriverException):
+                continue
+            if y is not None and top < y < bottom:
+                amounts.append(txt)
+        return amounts
+
+    def wait_for_net_worth(self, timeout=30) -> list[float]:
+        """Poll (longer, poll-based — not a snapshot) until the 'My net worth'
+        card's component rows are fully populated, then return the parsed dollar
+        figures on screen.
+
+        Gating is on the card the net-worth tests actually read — header + both
+        component labels present AND both component figures well-formed (see
+        net_worth_components_ready) — rather than 'any positive figure anywhere on
+        the screen'. The old loose gate let an unrelated positive figure (e.g.
+        Monthly tracker) satisfy the wait while this card still showed $0
+        placeholders or hadn't rendered its component rows, a slow-emulator race
+        that made callers read partial values. The headline net-worth figure is
+        deliberately NOT part of this gate: on the current build the card renders
+        no separate headline figure, and gating on it would hang the full timeout
+        then fail for the wrong reason.
+
+        Backward-compatible return: the parsed money values on screen (callers do
+        `max(...)`/truthiness on it), with the investments total as the largest."""
         import time
         from selenium.common.exceptions import WebDriverException
         end = time.time() + timeout
-        values: list[float] = []
         while time.time() < end:
             try:
-                values = self.get_money_values()
+                if self.net_worth_components_ready():
+                    return self.get_money_values()
             except WebDriverException:
-                values = []
-            if values and max(values) > 0:
-                return values
+                pass
             time.sleep(0.5)
-        return values
+        # Timed out: return whatever figures are on screen so legacy callers still
+        # get their best-effort list rather than an empty hard failure here.
+        try:
+            return self.get_money_values()
+        except WebDriverException:
+            return []

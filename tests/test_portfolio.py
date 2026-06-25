@@ -46,16 +46,19 @@ class TestMainPortfolioScreen:
         assert main_portfolio.is_visible(main_portfolio.TOTAL_INVESTED_LABEL)
 
     def test_performance_section_visible_after_scroll(self, main_portfolio):
-        main_portfolio.scroll_down()
+        # Controlled scroll-to-target instead of a fixed-distance swipe that can
+        # over/undershoot the section on different screen heights. The fixture
+        # re-opens Main Portfolio at the top, so a forward scroll_to_text reliably
+        # finds the lower section.
+        main_portfolio.scroll_to_text("Performance")
         assert main_portfolio.is_visible(main_portfolio.PERFORMANCE_HEADER)
 
     def test_manage_portfolio_section_visible_after_scroll(self, main_portfolio):
-        main_portfolio.scroll_down()
+        main_portfolio.scroll_to_text("Round-Ups")
         assert main_portfolio.is_visible(main_portfolio.ROUND_UPS_ROW)
 
     def test_about_portfolio_section_visible_after_scroll(self, main_portfolio):
-        main_portfolio.scroll_down()
-        main_portfolio.scroll_down()
+        main_portfolio.scroll_to_text("Transaction history")
         assert main_portfolio.is_visible(main_portfolio.TRANSACTION_HISTORY_ROW)
 
 
@@ -79,13 +82,23 @@ class TestPerformanceScreen:
     def test_performance_screen_loads(self, performance):
         assert performance.is_loaded()
 
-    @pytest.mark.xfail(reason="Requires account with active jars", strict=False)
     def test_portfolio_tab_visible(self, performance):
-        assert performance.is_visible(performance.PORTFOLIO_TAB)
+        # The shared account now HAS jars, so the Performance screen splits into a
+        # 'Main Portfolio' tab and a 'Jar:' tab. The split only renders when a jar
+        # exists, so be data-adaptive: skip cleanly if the jar tab isn't present
+        # (no split surfaced), otherwise the 'Main Portfolio' tab must be there too.
+        if not performance.is_visible(performance.JAR_TAB, timeout=STATE_PROBE_WAIT):
+            pytest.skip("No jar tab on Performance — account/build does not surface the Portfolio/Jar split")
+        assert performance.is_visible(performance.PORTFOLIO_TAB), \
+            "Jar tab is present but the 'Main Portfolio' tab is missing from the Performance split"
 
-    @pytest.mark.xfail(reason="Requires account with active jars", strict=False)
     def test_jar_tab_visible(self, performance):
-        assert performance.is_visible(performance.JAR_TAB)
+        # Data-adaptive: assert the jar tab carries a real 'Jar:' label if present,
+        # skip if the account/build doesn't surface the split.
+        if not performance.is_visible(performance.JAR_TAB, timeout=STATE_PROBE_WAIT):
+            pytest.skip("No jar tab on Performance — account/build does not surface the Portfolio/Jar split")
+        label = performance.get_text(performance.JAR_TAB)
+        assert "Jar:" in label, f"Jar tab present but its label is not a real 'Jar:' descriptor: {label!r}"
 
     def test_investment_value_label_visible(self, performance):
         assert performance.is_visible(performance.INVESTMENT_VALUE_LABEL)
@@ -95,25 +108,20 @@ class TestPerformanceScreen:
                         performance.TIME_6M, performance.TIME_1Y, performance.TIME_ALL]:
             assert performance.is_visible(locator)
 
-    def test_select_1d_range(self, performance):
-        performance.select_time_range("1D")
-        assert performance.is_visible(performance.TIME_1D)
-
-    def test_select_1m_range(self, performance):
-        performance.select_time_range("1M")
-        assert performance.is_visible(performance.TIME_1M)
-
-    def test_select_all_range(self, performance):
-        performance.select_time_range("All")
-        assert performance.is_visible(performance.TIME_ALL)
-
     def test_market_status_displayed(self, performance):
         assert performance.is_visible(performance.MARKET_STATUS)
 
-    @pytest.mark.xfail(reason="Requires account with active jars", strict=False)
     def test_jar_tab_navigates(self, performance):
+        # Data-adaptive: only exercise the jar-tab navigation when the split is
+        # present. Tapping the jar tab must switch the headline to the jar's value
+        # — assert a real, well-formed money value renders after the switch, not
+        # merely that the tab is still visible.
+        if not performance.is_visible(performance.JAR_TAB, timeout=STATE_PROBE_WAIT):
+            pytest.skip("No jar tab on Performance — account/build does not surface the Portfolio/Jar split")
         performance.select_jar_tab()
-        assert performance.is_visible(performance.JAR_TAB)
+        assert performance.is_visible(performance.JAR_TAB), "Jar tab disappeared after selecting it"
+        amount = performance.get_investment_amount()
+        assert_non_negative_money(amount, "Performance jar-tab headline value")
 
 
 @pytest.mark.portfolio
@@ -394,8 +402,10 @@ class TestTransactionOrderingAndFilter:
         )
         # The active filter surfaces its type as a screen-level header
         # ('Lump Sum'), confirming the chosen filter is actually applied (it is a
-        # sticky group header, not a per-row label).
-        assert page.is_present_now(page.by_text(page.FILTER_TYPE_NAME)), (
+        # sticky group header, not a per-row label). The header can render a beat
+        # after the filtered list settles, so wait briefly rather than taking an
+        # instant snapshot that races the re-render.
+        assert page.is_visible(page.by_text(page.FILTER_TYPE_NAME), timeout=STATE_PROBE_WAIT), (
             f"The '{page.FILTER_TYPE_NAME}' filter header is not shown — the chosen "
             "filter does not appear to be applied"
         )

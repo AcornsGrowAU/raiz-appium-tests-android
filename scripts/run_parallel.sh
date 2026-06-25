@@ -37,6 +37,13 @@ set -o pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 PY=./venv/bin/python
+# Keep the Mac awake for the whole run: a maintenance/idle sleep mid-run freezes
+# the emulators + Appium and crashes whatever test is executing. `caffeinate -i`
+# holds an idle-sleep assertion until pytest exits. No-ops if caffeinate is absent
+# (non-macOS); override with CAFFEINATE="" to disable. NOTE: still sleeps if the
+# LID is closed — keep it open (or on AC + external display) for unattended runs.
+CAFFEINATE="${CAFFEINATE-caffeinate -i}"
+command -v caffeinate >/dev/null 2>&1 || CAFFEINATE=""
 TIMEOUT="${TIMEOUT:-120}"
 EXTRA_MARK="${1:-}"                       # optional pytest -m marker, e.g. smoke
 LOGDIR="${LOGDIR:-/tmp/raiz_parallel}"
@@ -99,7 +106,7 @@ for shard in "${SHARDS[@]}"; do
   (
     ANDROID_UDID="$udid" APPIUM_HOST="http://127.0.0.1:${aport}" \
     ANDROID_SYSTEM_PORT="$sport" ANDROID_MJPEG_PORT="$mport" \
-      "$PY" -m pytest $files "${k_args[@]}" "${m_args[@]}" "${out_args[@]}" \
+      $CAFFEINATE "$PY" -m pytest $files "${k_args[@]}" "${m_args[@]}" "${out_args[@]}" \
         -q --timeout="$TIMEOUT" --timeout_method=signal --tb=line >> "$log" 2>&1
     echo "EXIT=$?" >> "$log"
   ) &

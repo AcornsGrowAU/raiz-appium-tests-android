@@ -92,21 +92,21 @@ class TestHomeNavigation:
         driver.back()
 
     def test_main_portfolio_card_navigates(self, home, driver):
-        home.scroll_down()
+        # tap_main_portfolio() does the controlled reveal (Today tab +
+        # scroll_to_top + scroll_to_text) and self-recovers a recycled card; a
+        # pre-emptive blind scroll_down() only risks overshooting it off-screen.
         home.tap_main_portfolio()
         page = MainPortfolioPage(driver)
         assert page.is_loaded()
         driver.back()
 
     def test_jars_card_navigates(self, home, driver):
-        home.scroll_down()
         home.tap_jars()
         page = JarsPage(driver)
         assert page.is_loaded()
         driver.back()
 
     def test_kids_card_navigates(self, home, driver):
-        home.scroll_down()
         home.tap_kids()
         page = KidsPage(driver)
         assert page.is_loaded()
@@ -115,11 +115,14 @@ class TestHomeNavigation:
 
 class TestHomeScrollContent:
     def test_how_you_invest_section_visible_after_scroll(self, home):
-        home.scroll_down()
+        # 'HOW YOU INVEST' sits below the account cards on the Today tab. A blind
+        # fixed-distance scroll_down() can over/undershoot; reveal() does the
+        # controlled Today-tab + scroll_to_top + scroll_to_text to the target.
+        home.reveal("HOW YOU INVEST")
         assert home.is_visible(home.HOW_YOU_INVEST_HEADER)
 
     def test_milestone_widget_visible_after_scroll(self, home):
-        home.scroll_down()
+        home.reveal("Milestone")
         assert home.is_visible(home.MILESTONE_WIDGET)
 
 

@@ -201,6 +201,40 @@ class HomePage(BasePage):
         return [t.text for t in cards[0].find_elements(
             AppiumBy.XPATH, ".//android.widget.TextView[string-length(@text) > 0]")]
 
+    @staticmethod
+    def _count_from_texts(texts: list[str]) -> int | None:
+        """Parse the jar/kid COUNT the card surfaces (RAIZ-10355). The Jars/Kids
+        card renders the count alongside the label; a freshly created jar must bump
+        it. Return the count found in the card's TextViews, or None if the card
+        shows no count (the empty 'Add' state surfaces no number).
+
+        Two on-device shapes are accepted (verified on emulator-5556, build 3226):
+          - a bare integer token, e.g. '2'; and
+          - the populated-card token that bakes the count INTO the label, e.g.
+            '1 JARS' / '2 KIDS' — a fresh jar makes the empty Jars card switch from
+            'Add' straight to '1 JARS' (one TextView), so a bare-integer-only probe
+            read None even though the count had clearly incremented.
+        Money ('$12'), percentages and decimals are excluded so we read the count,
+        not a balance."""
+        import re
+        for t in texts:
+            s = (t or "").strip()
+            # A bare integer token — exclude money, percentages, and decimals.
+            if re.fullmatch(r"\d+", s):
+                return int(s)
+            # The label-baked count, e.g. '1 JARS' / '2 KIDS': leading integer
+            # immediately followed by an alphabetic label, no '$'/'%'/'.' in it.
+            m = re.fullmatch(r"(\d+)\s+[A-Za-z]+", s)
+            if m:
+                return int(m.group(1))
+        return None
+
+    def jars_card_count(self) -> int | None:
+        """The number of jars the Home Jars card reports, or None when the card is
+        in the empty 'Add' state (no count rendered). Used by RAIZ-10355: the count
+        must increment by exactly one after a jar is created."""
+        return self._count_from_texts(self._card_texts(self.JARS_CARD, scroll_label="Jars"))
+
     def jars_card_is_empty(self) -> bool:
         """True when the Jars card shows only the 'Add' affordance (no jars yet)."""
         return "Add" in self._card_texts(self.JARS_CARD, scroll_label="Jars")

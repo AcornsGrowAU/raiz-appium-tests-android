@@ -1,0 +1,227 @@
+{
+  "presence_funded": {
+    "key": "presence_funded",
+    "email": "fixture.presence_funded.1782256996@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42057,
+    "created_at": 1782256998,
+    "onboarded": true,
+    "reused": false
+  },
+  "rich_withdrawal_buffer": {
+    "key": "rich_withdrawal_buffer",
+    "email": "fixture.rich_withdrawal_buffer.1782256998@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42058,
+    "created_at": 1782256999,
+    "onboarded": false,
+    "reused": false
+  },
+  "kids_withdrawal_buffer": {
+    "key": "kids_withdrawal_buffer",
+    "email": "fixture.kids_withdrawal_buffer.1782256999@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42060,
+    "created_at": 1782257000,
+    "onboarded": false,
+    "reused": false
+  },
+  "jars_withdrawal_buffer": {
+    "key": "jars_withdrawal_buffer",
+    "email": "fixture.jars_withdrawal_buffer.1782257000@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42062,
+    "created_at": 1782257001,
+    "onboarded": false,
+    "reused": false
+  },
+  "history_seeded_deposit": {
+    "key": "history_seeded_deposit",
+    "email": "fixture.history_seeded_deposit.1782257002@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42063,
+    "created_at": 1782257002,
+    "onboarded": false,
+    "reused": false
+  },
+  "kids_siblings_distinct": {
+    "key": "kids_siblings_distinct",
+    "email": "fixture.kids_siblings_distinct.1782257003@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42064,
+    "created_at": 1782257004,
+    "onboarded": true,
+    "reused": false
+  },
+  "jars_siblings_distinct": {
+    "key": "jars_siblings_distinct",
+    "email": "fixture.jars_siblings_distinct.1782257004@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42067,
+    "created_at": 1782257005,
+    "onboarded": true,
+    "reused": false
+  },
+  "bare_kid": {
+    "key": "bare_kid",
+    "email": "fixture.bare_kid.1782271273@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42105,
+    "created_at": 1782271274,
+    "onboarded": false,
+    "reused": false
+  },
+  "six_jars_cap": {
+    "key": "six_jars_cap",
+    "email": "fixture.six_jars_cap.1782274954@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42289,
+    "created_at": 1782275021,
+    "onboarded": false,
+    "reused": false
+  },
+  "eight_kids_cap": {
+    "key": "eight_kids_cap",
+    "email": "fixture.eight_kids_cap.1782271276@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42114,
+    "created_at": 1782271279,
+    "onboarded": false,
+    "reused": false
+  },
+  "conserve_main_jar_kid": {
+    "key": "conserve_main_jar_kid",
+    "email": "fixture.conserve_main_jar_kid.1782271279@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42123,
+    "created_at": 1782271280,
+    "onboarded": false,
+    "reused": false
+  },
+  "kid_fund_two": {
+    "key": "kid_fund_two",
+    "email": "fixture.kid_fund_two.1782271280@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42126,
+    "created_at": 1782271281,
+    "onboarded": false,
+    "reused": false
+  },
+  "jar_target_goal": {
+    "key": "jar_target_goal",
+    "email": "fixture.jar_target_goal.1782271282@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42129,
+    "created_at": 1782271283,
+    "onboarded": false,
+    "reused": false
+  },
+  "jar_progress_ring": {
+    "key": "jar_progress_ring",
+    "email": "fixture.jar_progress_ring.1782271283@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42131,
+    "created_at": 1782271284,
+    "onboarded": false,
+    "reused": false
+  },
+  "portfolio_aggressive": {
+    "key": "portfolio_aggressive",
+    "email": "fixture.portfolio_aggressive.1782271284@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42133,
+    "created_at": 1782271285,
+    "onboarded": false,
+    "reused": false
+  },
+  "portfolio_conservative": {
+    "key": "portfolio_conservative",
+    "email": "fixture.portfolio_conservative.1782271285@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42134,
+    "created_at": 1782271285,
+    "onboarded": false,
+    "reused": false
+  },
+  "portfolio_moderate": {
+    "key": "portfolio_moderate",
+    "email": "fixture.portfolio_moderate.1782271286@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42135,
+    "created_at": 1782271286,
+    "onboarded": false,
+    "reused": false
+  },
+  "jar_portfolio_distinct": {
+    "key": "jar_portfolio_distinct",
+    "email": "fixture.jar_portfolio_distinct.1782271288@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42139,
+    "created_at": 1782271289,
+    "onboarded": false,
+    "reused": false
+  },
+  "jar_below_min": {
+    "key": "jar_below_min",
+    "email": "fixture.jar_below_min.1782271289@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42141,
+    "created_at": 1782271290,
+    "onboarded": false,
+    "reused": false
+  },
+  "plan_lite": {
+    "key": "plan_lite",
+    "email": "fixture.plan_lite.1782271291@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42144,
+    "created_at": 1782271292,
+    "onboarded": false,
+    "reused": false
+  },
+  "plan_regular": {
+    "key": "plan_regular",
+    "email": "fixture.plan_regular.1782271292@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42145,
+    "created_at": 1782271292,
+    "onboarded": false,
+    "reused": false
+  },
+  "plan_plus": {
+    "key": "plan_plus",
+    "email": "fixture.plan_plus.1782281371@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42567,
+    "created_at": 1782281380,
+    "onboarded": true,
+    "reused": false
+  },
+  "myfinance_unlinked": {
+    "key": "myfinance_unlinked",
+    "email": "fixture.myfinance_unlinked.1782273308@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42244,
+    "created_at": 1782273309,
+    "onboarded": false,
+    "reused": false
+  },
+  "kids_portfolio_distinct": {
+    "key": "kids_portfolio_distinct",
+    "email": "fixture.kids_portfolio_distinct.1782273401@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42249,
+    "created_at": 1782273403,
+    "onboarded": false,
+    "reused": false
+  },
+  "inflow_seeded": {
+    "key": "inflow_seeded",
+    "email": "fixture.inflow_seeded.1782273548@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 42255,
+    "created_at": 1782273549,
+    "onboarded": false,
+    "reused": false
+  }
+}

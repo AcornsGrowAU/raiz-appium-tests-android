@@ -2,4 +2,7 @@
 # Allure
 reports/allure-results/
 reports/allure-report/
+
+# Failure screenshots (CI artifacts)
+reports/screenshots/
 .env
