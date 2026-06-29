@@ -2,6 +2,8 @@
 Investment flow tests — Lump Sum, Withdraw, Recurring Investments.
 These tests verify the UI and keypad behaviour WITHOUT submitting real transactions.
 """
+import time
+
 import pytest
 from appium.webdriver.common.appiumby import AppiumBy
 from pages.lump_sum_page import LumpSumPage
@@ -127,8 +129,20 @@ class TestAddFundsModal:
 
     def test_modal_closes_on_back(self, home, driver):
         home.tap_add_funds()
+        page = BasePage(driver)
+        # The Add-funds sheet is a Compose ModalBottomSheet. Its dismissal is
+        # driven by sheetState/BackHandler, which only becomes active once the
+        # enter-animation has settled. If driver.back() fires mid-animation it
+        # falls through to the activity's default back-press and EXITS the app
+        # instead of closing the sheet. Wait for the sheet's title (real string:
+        # quick_actions_dialog_title = "Add funds") to be visible, then add a
+        # short settle so the back handler is registered before we go back.
+        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Add funds']")), \
+            "Add funds sheet did not appear after tapping Add funds"
+        time.sleep(0.4)
         driver.back()
-        assert home.is_loaded()
+        assert home.is_loaded(), \
+            "Back press should close the Add funds sheet and return to Home"
 
 
 @pytest.mark.investments
