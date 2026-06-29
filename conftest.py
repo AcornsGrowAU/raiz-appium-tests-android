@@ -6,7 +6,7 @@ from appium.webdriver.common.appiumby import AppiumBy
 from config.capabilities import get_android_options, get_ios_options
 from config.settings import (
     APPIUM_HOST, PLATFORM, STATE_PROBE_WAIT, DEFAULT_WAIT, LONG_WAIT, POLL_INTERVAL,
-    TEST_EMAIL, TEST_PASSWORD, TEST_PIN,
+    TEST_EMAIL, TEST_PASSWORD, TEST_PIN, ANDROID_APP_PACKAGE,
 )
 from pages.splash_page import SplashPage
 from pages.login_page import LoginPage
@@ -152,7 +152,27 @@ def _clear_pin_gate(driver, probe_timeout=STATE_PROBE_WAIT, attempts=2) -> bool:
     return True
 
 
-def _open_deep_link(driver, link: str, ready=None, settle=DEFAULT_WAIT):
+def _ensure_raiz_foreground(driver):
+    """Best-effort: reclaim the foreground for the Raiz app if something else is on
+    top. A Settings row ('Get support' / 'Our terms') fires an Intent into external
+    Chrome (com.android.chrome); Chrome's first-run/consent screen swallows the next
+    raiz:// deep link, stranding every later serial test's home fixture at
+    assert is_loaded(). If the current foreground package is something other than
+    ours, kill Chrome (it's the usual culprit) and re-activate the app. Wrapped so it
+    can never raise — a dead driver or a missing capability must not fail a test."""
+    try:
+        current = driver.current_package
+        if current and current != ANDROID_APP_PACKAGE:
+            try:
+                driver.terminate_app("com.android.chrome")
+            except Exception:
+                pass
+            driver.activate_app(ANDROID_APP_PACKAGE)
+    except Exception:
+        pass
+
+
+def _open_deep_link(driver, link: str, ready=None, settle=LONG_WAIT):
     """Open a deep link, handling PIN re-authentication if the app requires it.
 
     Some screens (deposit, withdraw, round_ups/settings) trigger a PIN check when
@@ -168,6 +188,10 @@ def _open_deep_link(driver, link: str, ready=None, settle=DEFAULT_WAIT):
       misses, without penalising routes that never gate.
     """
     import time
+    # If a Settings link bounced us into external Chrome, the deep link below would
+    # land on Chrome's first-run screen instead of the app. Reclaim the foreground
+    # first so DeepLinks.open resolves inside Raiz.
+    _ensure_raiz_foreground(driver)
     DeepLinks.open(driver, link)
     if ready is None:
         _clear_pin_gate(driver)
@@ -177,12 +201,18 @@ def _open_deep_link(driver, link: str, ready=None, settle=DEFAULT_WAIT):
     pin_entries = 0
     while time.time() < deadline:
         # A PIN gate up now takes priority — the destination can't be 'ready' behind
-        # it. Enter it (bounded; never past lockout) and re-loop to re-check.
+        # it. Clear it (verify-and-re-enter; never past lockout) and re-loop. The
+        # bare _enter_pin here used to skip the gate-cleared verification that
+        # _clear_pin_gate already does, so a swallowed first Compose keypress left
+        # finance/raiz_kids_2 stranded on an empty PIN screen.
         if pin.is_present_now(pin.TITLE):
             if pin_entries >= 3 or _pin_locked_out(driver):
                 return  # leave recovery to the caller's assert / _ensure_logged_in
-            _enter_pin(pin, driver)
+            _clear_pin_gate(driver)
             pin_entries += 1
+            # The keypad wait above shouldn't be charged against the destination's
+            # render budget — give the loop a fresh `settle` window after a gate.
+            deadline = max(deadline, time.time() + settle)
             time.sleep(POLL_INTERVAL * 3)
             continue
         if ready(driver):
@@ -326,6 +356,10 @@ def _ensure_logged_in(driver):
         # Unknown / still-loading screen. Try the HOME deep-link once, then keep
         # looping so a PIN prompt it triggers (or a slow render) is handled above.
         if not deep_linked:
+            # External Chrome (Settings → Get support / Our terms) can sit on top
+            # after a prior test; reclaim Raiz so this HOME deep link resolves in-app
+            # instead of bouncing off Chrome's first-run screen.
+            _ensure_raiz_foreground(driver)
             DeepLinks.open(driver, DeepLinks.HOME)
             deep_linked = True
             pin.is_loaded(timeout=STATE_PROBE_WAIT)
@@ -434,6 +468,25 @@ def _reauthenticate_if_needed(request):
         _ensure_logged_in(d)
 
 
+@pytest.fixture(scope="function", autouse=True)
+def _reclaim_foreground_after_test(request):
+    """After every test that uses the shared `driver`, make sure Raiz is back in the
+    foreground. A test that tapped a Settings row opening external Chrome ('Get
+    support' / 'Our terms') would otherwise leave Chrome on top, stranding the next
+    serial test's home fixture. No-op for tests that don't use `driver` (genuser_e2e
+    tests manage their own driver). Best-effort — never raises, even on a dead
+    session."""
+    if "driver" not in request.fixturenames:
+        yield
+        return
+    yield
+    try:
+        d = request.getfixturevalue("driver")
+        _ensure_raiz_foreground(d)
+    except Exception:
+        pass
+
+
 def _scroll_to_top(driver) -> bool:
     """Scroll the current scrollable container to its first item. Returns True on success."""
     try:
@@ -470,6 +523,10 @@ def home(driver):
     if splash.is_present_now(splash.TAGLINE):
         _ensure_logged_in(driver)
     else:
+        # A prior test may have left external Chrome on top (Settings → Get support /
+        # Our terms); reclaim the app before the HOME deep link so it doesn't strand
+        # on Chrome's first-run screen.
+        _ensure_raiz_foreground(driver)
         _open_deep_link(driver, DeepLinks.HOME)
     page.dismiss_modal()
     assert page.is_loaded()

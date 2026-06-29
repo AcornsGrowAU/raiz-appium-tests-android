@@ -21,12 +21,14 @@ Design:
 
 Markers: reuse ONLY existing markers (navigation, e2e).
 """
+import time
+
 import pytest
 from appium.webdriver.common.appiumby import AppiumBy
 
 from utils.deep_links import DeepLinks
 from config.settings import STATE_PROBE_WAIT, ANDROID_APP_PACKAGE
-from conftest import _open_deep_link
+from conftest import _open_deep_link, _ensure_raiz_foreground
 
 from pages.base_page import BasePage
 from pages.home_page import HomePage
@@ -71,9 +73,30 @@ def _dismiss_dividends_oops(driver):
         _open_deep_link(driver, DeepLinks.DIVIDENDS)
 
 
+def _left_app(driver, timeout=8) -> bool:
+    """Poll until the app is no longer the foreground package (an external browser
+    has taken over) or the timeout elapses. The 'Get support' row launches Chrome,
+    and that handoff can land a beat after the tap — a single current_package read
+    races it, so we poll. Returns True if Raiz is backgrounded within `timeout`."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if driver.current_package != ANDROID_APP_PACKAGE:
+                return True
+        except Exception:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
 def _recover_home(driver):
     """Bring the app back to a known Home state (used after launcher-exit and
     back-stack cases so the serial suite stays order-independent)."""
+    # External-browser settings rows (e.g. Get support → Chrome) can leave the
+    # app backgrounded; reclaim the Raiz foreground before the HOME deep link so
+    # the recovery — and the serial run — stays order-independent.
+    _ensure_raiz_foreground(driver)
     _open_deep_link(driver, DeepLinks.HOME)
     return HomePage(driver).is_loaded()
 
@@ -445,7 +468,7 @@ class TestSettingsCoverage:
          # not an in-app screen — so leaving the Raiz app to a browser IS the
          # success signal (the in-app text matcher only hits if the page renders
          # in-process, which it doesn't on this build).
-         lambda d: d.current_package != ANDROID_APP_PACKAGE
+         lambda d: _left_app(d, timeout=8)
                    or _present(d, "//*[contains(@text,'Need a hand') or contains(@text,'Contact') "
                                   "or contains(@text,'1300 75 47 48') or contains(@text,'support')]", timeout=8), True),
         ("Our terms", "tap_our_terms",
@@ -461,6 +484,10 @@ class TestSettingsCoverage:
 
     def _back_to_settings(self, driver):
         """Press Back and confirm we land on Settings; recover via gear if not."""
+        # The Get support row opens an external browser (Chrome); reclaim the Raiz
+        # foreground first so driver.back() pops the in-app stack rather than the
+        # browser, keeping this serial recovery order-independent.
+        _ensure_raiz_foreground(driver)
         driver.back()
         page = SettingsPage(driver)
         if page.is_loaded(timeout=STATE_PROBE_WAIT):

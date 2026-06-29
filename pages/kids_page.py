@@ -33,6 +33,20 @@ class KidsPage(BasePage):
     def is_welcome_screen(self, timeout=2) -> bool:
         return self.is_visible(self.WELCOME_TITLE, timeout=timeout)
 
+    def accept_consent(self, timeout=2) -> bool:
+        """If the Raiz Kids identity-consent gate is up, accept it (tap 'I consent'/
+        Continue) to advance toward the list. A parent WHO HAS active kids still hits
+        this gate on a freshly-installed/cleared app, so accepting it — the real user
+        action — is what reveals the populated list. Idempotent: a no-op (returns
+        False) when the consent gate isn't showing. Never raises."""
+        if not self.is_consent_screen(timeout=timeout):
+            return False
+        try:
+            self.click(self.I_CONSENT_BUTTON)
+            return True
+        except Exception:
+            return False
+
     def is_entry_loaded(self, timeout=DEFAULT_WAIT) -> bool:
         """True on any of the Kids entry surfaces: list title, consent gate, or
         the create-onboarding welcome."""

@@ -55,6 +55,26 @@ def _unlock_to_home(driver, pin: PinPage) -> HomePage:
     driver._biometrics_pending = True
     home = HomePage(driver)
     home.dismiss_modal()
+    if home.is_loaded():
+        return home  # happy path unchanged
+
+    # PIN-heavy tests (wrong-PIN / backspace cases) can trip the app's
+    # "Too many attempts" lockout — the dialog reads "Too many attempts" /
+    # "You've made too many failed attempts to log in with your PIN..." (real
+    # strings: raizFeatureSignUp/.../strings.xml pin_dialog_too_many_attempts_*).
+    # Once locked out the app drops to the splash/credential login, so the PIN we
+    # just entered can never reach Home. Detect the lockout dialog or the splash
+    # TAGLINE and route recovery through the credential re-login helper, which owns
+    # the lockout-reset path. Local import to avoid any import cycle with conftest.
+    from appium.webdriver.common.appiumby import AppiumBy
+    lockout = (AppiumBy.XPATH,
+               "//*[contains(@text,'Too many attempts') "
+               "or contains(@text,'too many failed')]")
+    splash = SplashPage(driver)
+    if home.is_present_now(lockout) or splash.is_present_now(splash.TAGLINE):
+        from conftest import _ensure_logged_in
+        _ensure_logged_in(driver)
+        home = HomePage(driver)
     return home
 
 

@@ -81,6 +81,10 @@ def _open_kids_list(d) -> KidsPage:
         while time.time() < deadline:
             if kids.is_list_screen(timeout=2):
                 return kids
+            # A parent WITH active kids still hits the identity-consent gate on a
+            # freshly-cleared app; ACCEPT it (tap 'I consent') to advance to the
+            # populated list rather than only waiting the gate out.
+            kids.accept_consent(timeout=2)
             if attempt < 3:
                 time.sleep(1)
         time.sleep(2 + attempt)
