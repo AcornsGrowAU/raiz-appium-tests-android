@@ -22,14 +22,25 @@ class OnboardingPage(BasePage):
     """
 
     def _tap_text(self, *labels):
+        """Tap a control by its visible label, preferring the clickable ANCESTOR of
+        the text. Compose renders most CTAs as a non-clickable TextView inside a
+        clickable container; clicking the bare TextView can no-op, and complete()
+        then re-taps the same screen every step until the per-test timeout — the
+        build-3252 'Select plan' / 'Select your Portfolio' screens hit exactly this.
+        Try clickable-parent (exact, then contains), then the bare text as fallback."""
         for lab in labels:
-            for e in self.driver.find_elements(
-                    AppiumBy.XPATH, f"//*[@text='{lab}'] | //*[contains(@text,'{lab}')]"):
-                try:
-                    e.click()
-                    return lab
-                except Exception:
-                    pass
+            for xp in (
+                f"//*[@clickable='true'][.//*[@text='{lab}']]",
+                f"//*[@clickable='true'][.//*[contains(@text,'{lab}')]]",
+                f"//*[@text='{lab}']",
+                f"//*[contains(@text,'{lab}')]",
+            ):
+                for e in self.driver.find_elements(AppiumBy.XPATH, xp):
+                    try:
+                        e.click()
+                        return lab
+                    except Exception:
+                        pass
         return None
 
     def _tap_id(self, rid):
