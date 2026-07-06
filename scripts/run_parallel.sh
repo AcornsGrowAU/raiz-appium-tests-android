@@ -147,6 +147,12 @@ build=$(adb -s "$(echo "${SHARDS[0]}" | cut -d'|' -f1)" shell dumpsys package "$
 if command -v allure >/dev/null 2>&1; then
   echo ""
   echo "== Allure =="
+  # Carry prior trend history into the results so the Trend/History widgets
+  # accumulate across runs (allure reads history/ from the results dir; --clean
+  # would otherwise discard it each run).
+  if [ -d "${ALLURE_REPORT}/history" ]; then
+    rm -rf "${ALLURE_DIR}/history"; cp -R "${ALLURE_REPORT}/history" "${ALLURE_DIR}/history"
+  fi
   allure generate --clean "$ALLURE_DIR" -o "$ALLURE_REPORT" >/dev/null 2>&1 \
     && echo "  Report:  ${ALLURE_REPORT}/index.html" \
     || echo "  (allure generate failed — raw results in ${ALLURE_DIR})"

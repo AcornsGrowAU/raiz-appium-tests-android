@@ -19,10 +19,12 @@ class MainPortfolioPage(BasePage):
     PERFORMANCE_DETAILS_ROW = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Performance details']]")
 
     INVESTED_HEADER = (AppiumBy.XPATH, "//*[@text='Invested']")
-    # App string is `main_portfolio_your_portfolio` = "Your portfolio" (verified in
-    # MainPortfolioPortfolioItem.kt). The previous locator searched for the typo'd
-    # "You portfolio", which never matches → deterministic fail on every build.
-    YOU_PORTFOLIO_ROW = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Your portfolio']]")
+    # The row RENDERS as "You portfolio" on-device (app typo — the string key is
+    # main_portfolio_your_portfolio but the displayed text drops the 'r'; confirmed
+    # by a build-3252 screenshot). Match BOTH spellings so the locator survives
+    # whether or not the app later fixes the typo. (get_you_portfolio_amount below
+    # already scrolls to "You portfolio" — this keeps the page object consistent.)
+    YOU_PORTFOLIO_ROW = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='You portfolio' or @text='Your portfolio']]")
     NET_INVESTED_ROW = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Net invested by you']]")
     REWARDS_ROW = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Rewards']]")
     TOTAL_INVESTED_LABEL = (AppiumBy.XPATH, "//*[@text='Total invested to date']")
