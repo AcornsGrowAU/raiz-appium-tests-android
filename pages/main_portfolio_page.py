@@ -1,5 +1,8 @@
+import re
+import time
 from appium.webdriver.common.appiumby import AppiumBy
-from config.settings import DEFAULT_WAIT
+from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
+from config.settings import DEFAULT_WAIT, POLL_INTERVAL
 from pages.base_page import BasePage
 
 
@@ -13,6 +16,12 @@ class MainPortfolioPage(BasePage):
     INVESTMENT_VALUE_HEADER = (AppiumBy.XPATH, "//*[contains(@text, 'investment account value') or contains(@text, \"main portfolio's investment value\")]")
     INVESTMENT_VALUE = (AppiumBy.XPATH, "//*[contains(@text, \"Your main portfolio's investment value\")]")
     INVESTMENT_AMOUNT = (AppiumBy.XPATH, "(//android.widget.TextView[contains(@text, '$')])[1]")
+    # Every '$' TextView (non-positional) — the candidate set for geometric pairing.
+    # The headline investment figure is read by pairing it to INVESTMENT_VALUE_HEADER
+    # (see _headline_value) rather than a positional [1] $-TextView read that a
+    # promo/CTA/redesign card can shift onto the wrong figure or a transient '$0.00'.
+    _MONEY_TEXTVIEWS = (AppiumBy.XPATH, "//android.widget.TextView[contains(@text, '$')]")
+    _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 
     ADD_FUNDS_BUTTON = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Add funds']]")
     WITHDRAW_BUTTON = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Withdraw']]")
@@ -55,8 +64,82 @@ class MainPortfolioPage(BasePage):
             return True
         return self.is_present(self.ANY_TITLE, timeout=timeout)
 
+    @classmethod
+    def _y_center(cls, el):
+        """Vertical centre of an element from its @bounds, or None if unparsable."""
+        m = cls._BOUNDS_RE.match(el.get_attribute("bounds") or "")
+        if not m:
+            return None
+        return (int(m.group(2)) + int(m.group(4))) / 2
+
+    def _value_near(self, label_locator) -> str:
+        """Return the money figure whose TextView sits nearest (vertically) to the
+        given label — the same geometric label->value pairing
+        MyFinancePage._value_near uses, but WITHOUT that helper's one-row (80px)
+        cap: the headline investment value renders BELOW its header (not on the same
+        row), so a same-row cap would drop it. Anchoring to the label stops a
+        promo/CTA card from shifting a positional [1] read onto the wrong figure.
+        Falls back to the first money TextView on screen when the label is absent —
+        no worse than the previous positional read."""
+        from utils.assertions import is_money
+        money_els = self.driver.find_elements(*self._MONEY_TEXTVIEWS)
+        labels = self.driver.find_elements(*label_locator)
+        if not labels:
+            for el in money_els:
+                try:
+                    if is_money(el.text):
+                        return el.text
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+            return ""
+        try:
+            label_y = self._y_center(labels[0])
+        except (StaleElementReferenceException, WebDriverException):
+            return ""
+        if label_y is None:
+            return ""
+        best_text, best_dist = "", None
+        for el in money_els:
+            try:
+                txt = el.text
+                if not is_money(txt):
+                    continue
+                y = self._y_center(el)
+            except (StaleElementReferenceException, WebDriverException):
+                continue
+            if y is None:
+                continue
+            dist = abs(y - label_y)
+            if best_dist is None or dist < best_dist:
+                best_text, best_dist = txt, dist
+        return best_text
+
+    def _headline_value(self, timeout=DEFAULT_WAIT) -> str:
+        """The headline investment value, read by anchoring to
+        INVESTMENT_VALUE_HEADER and settled: poll until the paired figure is
+        well-formed money AND stable across two consecutive reads, so we never latch
+        onto a transient '$0.00' mid-render. Returns the best-effort last read on
+        timeout (callers parse/assert it, so a genuinely broken value still fails
+        loudly there)."""
+        from utils.assertions import is_money
+        end = time.time() + timeout
+        prev = None
+        last = ""
+        while time.time() < end:
+            try:
+                cur = self._value_near(self.INVESTMENT_VALUE_HEADER)
+            except WebDriverException:
+                cur = ""
+            if is_money(cur):
+                last = cur
+                if cur == prev:
+                    return cur
+            prev = cur
+            time.sleep(POLL_INTERVAL)
+        return last or (prev or "")
+
     def get_investment_amount(self) -> str:
-        return self.get_text(self.INVESTMENT_AMOUNT)
+        return self._headline_value()
 
     def _row_amount(self, label: str) -> str:
         """Return the first dollar amount rendered inside the clickable row that

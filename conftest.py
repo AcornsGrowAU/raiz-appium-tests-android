@@ -54,6 +54,32 @@ def _xdist_device():
     return table[idx % len(table)]
 
 
+def secondary_session_target():
+    """Resolve (udid, appium_host) for a TEST-OWNED secondary Appium session so it
+    lands on THIS xdist worker's device — not always gw0's emulator-5554/4723.
+
+    Standalone (genuser) tests build their own second session; hardcoding
+    emulator-5554 + the default APPIUM_HOST means any worker under `-n` can open
+    that second session on gw0's device, stacking a 3rd session on one emulator
+    (the ~2GB 3-session OOM). Mirror _xdist_device()'s worker->device mapping
+    instead. When NOT under xdist, honour ANDROID_UDID + APPIUM_HOST from the env
+    and FAIL-FAST if the udid is unset, rather than silently defaulting to
+    5554/4723."""
+    dev = _xdist_device()
+    if dev:
+        udid, host, _sysport, _mjpeg = dev
+        return udid, host
+    udid = os.getenv("ANDROID_UDID")
+    if not udid:
+        raise RuntimeError(
+            "secondary_session_target: not running under pytest-xdist and "
+            "ANDROID_UDID is unset. Set ANDROID_UDID (and APPIUM_HOST) so the "
+            "secondary session targets a specific device instead of silently "
+            "defaulting to emulator-5554/4723 (3rd-session OOM risk)."
+        )
+    return udid, APPIUM_HOST
+
+
 def _create_driver(no_reset: bool = True):
     if PLATFORM != "android":
         return appium_webdriver.Remote(command_executor=APPIUM_HOST, options=get_ios_options(no_reset))
@@ -638,6 +664,12 @@ def transaction_history(driver):
     if not page.is_loaded(timeout=STATE_PROBE_WAIT):
         _open_deep_link(driver, DeepLinks.TRANSACTIONS)
     assert page.is_loaded()
+    # The title paints as soon as the screen mounts, but rows arrive async 1-3s
+    # later; TransactionHistoryPage documents wait_for_rows() as required before
+    # reading rows so callers don't race the fetch and see an empty list. It
+    # returns bool (never asserts) and early-returns on the first row / empty
+    # state, so it adds no time on a populated ledger and changes no oracle.
+    page.wait_for_rows()
     return page
 
 

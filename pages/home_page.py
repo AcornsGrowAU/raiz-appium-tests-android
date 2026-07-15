@@ -1,5 +1,8 @@
+import re
+import time
 from appium.webdriver.common.appiumby import AppiumBy
-from config.settings import DEFAULT_WAIT
+from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
+from config.settings import DEFAULT_WAIT, POLL_INTERVAL
 from pages.base_page import BasePage
 
 
@@ -11,11 +14,24 @@ class HomePage(BasePage):
     TAB_TODAY = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Today']]")
     TAB_FUTURE = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Future']]")
 
-    # Greeting renders as "Hello <Name>," — the comma follows the name, so the old
-    # 'Hello,' locator never matched. Match on "Hello".
-    GREETING = (AppiumBy.XPATH, "//*[contains(@text, 'Hello')]")
+    # Greeting renders as "Hello <Name>," on the legacy build and "Welcome <Name>"
+    # on the redesigned build — the comma follows the name, so the old 'Hello,'
+    # locator never matched. Match on "Hello" OR "Welcome" only. Deliberately NOT
+    # broadened to "Hi"/"Good " substrings: those appear inside unrelated copy
+    # (e.g. "Highlights", "Good news") and would match the wrong node.
+    GREETING = (AppiumBy.XPATH, "//*[contains(@text, 'Hello') or contains(@text, 'Welcome')]")
     TOTAL_VALUE_LABEL = (AppiumBy.XPATH, "//*[@text='Your total investments value']")
     TOTAL_VALUE_AMOUNT = (AppiumBy.XPATH, "(//android.widget.TextView[contains(@text, '$')])[1]")
+    # Label anchor for the headline total. The big dollar figure is read by pairing
+    # it geometrically to this label (see _headline_value) rather than by a
+    # positional [1] $-TextView read that a promo/CTA/redesign card can shift onto
+    # the wrong figure or a transient '$0.00'. Both the legacy and redesigned header
+    # copy are accepted so the read isn't gated on build-specific text.
+    HEADLINE_LABEL = (AppiumBy.XPATH,
+        "//*[@text='Your total investments value' or @text='Total investments value']")
+    # Every '$' TextView (non-positional) — the candidate set for geometric pairing.
+    _MONEY_TEXTVIEWS = (AppiumBy.XPATH, "//android.widget.TextView[contains(@text, '$')]")
+    _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 
     ADD_FUNDS_BUTTON = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Add funds']]")
     WITHDRAW_BUTTON = (AppiumBy.XPATH, "//android.view.View[@clickable='true'][.//android.widget.TextView[@text='Withdraw']]")
@@ -49,15 +65,90 @@ class HomePage(BasePage):
         return self.get_text(self.GREETING)
 
     def get_greeting_name(self) -> str:
-        """The personalised portion of the greeting. Greeting renders 'Hello <Name>,'
-        so strip the leading 'Hello' and surrounding punctuation/whitespace."""
+        """The personalised portion of the greeting. The greeting renders
+        'Hello <Name>,' (legacy) or 'Welcome <Name>' (redesign), so strip the
+        leading salutation and any surrounding punctuation/whitespace."""
         greeting = self.get_greeting()
-        if "Hello" in greeting:
-            return greeting.replace("Hello", "", 1).strip(" ,!.")
+        for salutation in ("Hello", "Welcome"):
+            if salutation in greeting:
+                return greeting.replace(salutation, "", 1).strip(" ,!.")
         return greeting.strip(" ,!.")
 
+    @classmethod
+    def _y_center(cls, el):
+        """Vertical centre of an element from its @bounds, or None if unparsable."""
+        m = cls._BOUNDS_RE.match(el.get_attribute("bounds") or "")
+        if not m:
+            return None
+        return (int(m.group(2)) + int(m.group(4))) / 2
+
+    def _value_near(self, label_locator) -> str:
+        """Return the money figure whose TextView sits nearest (vertically) to the
+        given label — the same geometric label->value pairing
+        MyFinancePage._value_near uses, but WITHOUT that helper's one-row (80px)
+        cap: the Home headline total renders BELOW its header (not on the same row),
+        so a same-row cap would drop it. Anchoring to the label stops a promo/CTA
+        card from shifting a positional [1] read onto the wrong figure. Falls back
+        to the first money TextView on screen when the label is absent (e.g. a build
+        that drops the header) — no worse than the previous positional read."""
+        from utils.assertions import is_money
+        money_els = self.driver.find_elements(*self._MONEY_TEXTVIEWS)
+        labels = self.driver.find_elements(*label_locator)
+        if not labels:
+            for el in money_els:
+                try:
+                    if is_money(el.text):
+                        return el.text
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+            return ""
+        try:
+            label_y = self._y_center(labels[0])
+        except (StaleElementReferenceException, WebDriverException):
+            return ""
+        if label_y is None:
+            return ""
+        best_text, best_dist = "", None
+        for el in money_els:
+            try:
+                txt = el.text
+                if not is_money(txt):
+                    continue
+                y = self._y_center(el)
+            except (StaleElementReferenceException, WebDriverException):
+                continue
+            if y is None:
+                continue
+            dist = abs(y - label_y)
+            if best_dist is None or dist < best_dist:
+                best_text, best_dist = txt, dist
+        return best_text
+
+    def _headline_value(self, timeout=DEFAULT_WAIT) -> str:
+        """The headline total, read by anchoring to HEADLINE_LABEL and settled:
+        poll until the paired figure is well-formed money AND stable across two
+        consecutive reads, so we never latch onto a transient '$0.00' mid-render.
+        Returns the best-effort last read on timeout (callers parse/assert it, so a
+        genuinely broken value still fails loudly there)."""
+        end = time.time() + timeout
+        prev = None
+        last = ""
+        while time.time() < end:
+            try:
+                cur = self._value_near(self.HEADLINE_LABEL)
+            except WebDriverException:
+                cur = ""
+            from utils.assertions import is_money
+            if is_money(cur):
+                last = cur
+                if cur == prev:
+                    return cur
+            prev = cur
+            time.sleep(POLL_INTERVAL)
+        return last or (prev or "")
+
     def get_total_value(self) -> str:
-        return self.get_text(self.TOTAL_VALUE_AMOUNT)
+        return self._headline_value()
 
     def _scroll_portfolio_cards_into_view(self, label: str = "Main Portfolio"):
         """Bring a specific investment account card on-screen. The cards sit under
@@ -117,13 +208,15 @@ class HomePage(BasePage):
     def pull_to_refresh(self):
         """Swipe down from near the top to trigger the pull-to-refresh gesture,
         then wait for the Home headline to settle back in."""
-        import time
         size = self.driver.get_window_size()
         x = size["width"] // 2
         # Start high (just under the header chrome) and drag well down so the
         # refresh control engages, then release.
         self.driver.swipe(x, int(size["height"] * 0.30), x, int(size["height"] * 0.80), 800)
-        time.sleep(1.0)
+        # Bounded settle poll instead of a fixed sleep: wait until the headline
+        # total re-renders as a stable, well-formed figure (same read the value
+        # getter uses) rather than sleeping a flat second and hoping.
+        self._headline_value()
 
     def tap_tab_past(self):
         self.click(self.TAB_PAST)

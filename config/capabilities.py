@@ -6,7 +6,16 @@ from config.settings import (
 )
 
 
-def get_android_options(no_reset: bool = True) -> UiAutomator2Options:
+# Port offset for SECONDARY sessions (a test-owned driver created while the
+# suite's session-scoped driver is alive on the same device). Two UiAutomator2
+# servers on one device must bind distinct host ports or the second session
+# dies at create with "port #NNNN is busy" — which is exactly what happened to
+# every own-driver generated-user test in full runs (fine in isolation, where
+# no shared driver holds the port).
+SECONDARY_PORT_OFFSET = 101
+
+
+def get_android_options(no_reset: bool = True, secondary: bool = False) -> UiAutomator2Options:
     import os
     opts = UiAutomator2Options()
     opts.device_name = "Samsung Galaxy S23"
@@ -21,13 +30,20 @@ def get_android_options(no_reset: bool = True) -> UiAutomator2Options:
     # parallel (one pytest process per device), each UiAutomator2 session needs a
     # distinct host systemPort/mjpegServerPort or they collide on the 8200/7810
     # defaults. Set ANDROID_SYSTEM_PORT (and optionally ANDROID_MJPEG_PORT) per
-    # process. Defaults preserve single-device behaviour.
+    # process. Defaults preserve single-device behaviour. Pass secondary=True for
+    # a test-owned second session so it binds its own ports next to the shared
+    # session driver's.
+    _off = SECONDARY_PORT_OFFSET if secondary else 0
     _sysport = os.getenv("ANDROID_SYSTEM_PORT")
     if _sysport:
-        opts.set_capability("systemPort", int(_sysport))
+        opts.set_capability("systemPort", int(_sysport) + _off)
+    elif secondary:
+        opts.set_capability("systemPort", 8200 + _off)
     _mjpeg = os.getenv("ANDROID_MJPEG_PORT")
     if _mjpeg:
-        opts.set_capability("mjpegServerPort", int(_mjpeg))
+        opts.set_capability("mjpegServerPort", int(_mjpeg) + _off)
+    elif secondary:
+        opts.set_capability("mjpegServerPort", 7810 + _off)
     opts.uiautomator2_server_launch_timeout = 60000
     # --- Stability hardening ---
     # The UiAutomator2 instrumentation can crash mid-run (observed: UiAutomation
