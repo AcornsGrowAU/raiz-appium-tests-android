@@ -18,6 +18,11 @@ UDID = "2204bb70-d6f7-4ccd-ad49-94d9b420feaa"
 GEN_EMAIL = os.getenv("GEN_EMAIL", "anmol@raizinvest.com.au")
 GEN_PWD = os.getenv("GEN_PWD", "TestDemo123")
 SEEDED_PWD = "Pass1234"
+# Server-side PIN of EVERY generated user: the backend user factory defaults the
+# security PIN to 1111 (validated server-side on PIN entry — discovered on-device
+# 2026-07-14: entering the suite's usual 0000 as a generated user is rejected).
+# Any on-device test that logs in as a generated user must enter THIS pin.
+GENUSER_PIN = "1111"
 RHO_MAX_RETRIES = int(os.getenv("RHO_MAX_RETRIES", "30"))
 
 
@@ -103,6 +108,110 @@ def current_balance(email, pwd=SEEDED_PWD):
 def can_login(email, pwd=SEEDED_PWD):
     _, tok = mint(email, pwd, budget_s=60)
     return bool(tok)
+
+
+# ---- jar reads (parent session) ---------------------------------------------
+# PRODUCT BEHAVIOUR: jars are sub-accounts of the main account with NO loginable
+# identity — /v1/sessions as a jar's email 401s by design (kids CAN log in, but
+# only with kid_account_data.account_access). Never mint a token for a jar email;
+# read jars through the PARENT's session via the jars API instead.
+
+def jar_users(parent_email, pwd=SEEDED_PWD):
+    """All jar sub-accounts visible to the parent, or None if the parent login/read
+    fails. Each entry carries id, name, accumulated_amount (the jar's balance) and
+    saving_amount (the goal/target)."""
+    op, tok = mint(parent_email, pwd)
+    if not tok:
+        return None
+    s, b = call(op, "GET", "/jars/v1/users", token=tok)
+    if s != 200 or not isinstance(b, dict):
+        return None
+    return b.get("jar_users", [])
+
+
+def jar_by_name(parent_email, name, pwd=SEEDED_PWD):
+    """The parent's jar whose name matches exactly (dict), else None."""
+    jars = jar_users(parent_email, pwd)
+    for j in jars or []:
+        if j.get("name") == name:
+            return j
+    return None
+
+
+def jar_balance_by_name(parent_email, name, pwd=SEEDED_PWD):
+    """The named jar's balance (accumulated_amount) read via the parent session,
+    or None if the parent read fails / no jar has that name."""
+    j = jar_by_name(parent_email, name, pwd)
+    amt = j.get("accumulated_amount") if j else None
+    return float(amt) if amt is not None else None
+
+
+# ---- mint-once cached-token reader ------------------------------------------
+class BalanceReader:
+    """Reads a backend balance reusing ONE minted session across many calls.
+
+    The module-level current_balance() / jar_balance_by_name() helpers mint a FRESH
+    /v1/sessions token on EVERY call. A settle-poll or a per-account reconciliation
+    that reads dozens of times therefore drives dozens of redundant logins against the
+    rate-limited sessions endpoint for the SAME user — which both causes and gets
+    tripped by /v1/sessions rate-limiting (a 400 backoff that can false-fail a settle
+    gate or silently skip a P0 oracle).
+
+    This reader mints ONCE per email, caches (opener, token), and re-mints ONLY when a
+    read comes back non-200 (token expiry / transient auth). The value returned is
+    IDENTICAL to the module helpers (same float current_balance / accumulated_amount,
+    None on failure) — only HOW the value is read changes, never WHAT is read. Promoted
+    from the proven _BalanceReader in tests/test_withdraw_available_value.py so every
+    settle-poll/reader can share one login. Both /v1/user (own account) and
+    /jars/v1/users (parent session) are served from the same cached token."""
+
+    def __init__(self, email, pwd=SEEDED_PWD):
+        self.email, self.pwd = email, pwd
+        self._op = self._tok = None
+
+    def _ensure_session(self):
+        if self._tok is None:
+            self._op, self._tok = mint(self.email, self.pwd)
+        return self._tok is not None
+
+    def _get(self, path):
+        """GET `path` with the cached token, re-minting ONCE on a non-200 (token
+        expiry / transient auth). Returns the parsed dict body, or None if the read
+        failed after the single re-mint."""
+        for _ in range(2):  # one retry: re-mint if the cached token was rejected
+            if not self._ensure_session():
+                self._op = self._tok = None
+                return None
+            s, b = call(self._op, "GET", path, token=self._tok)
+            if s == 200:
+                return b if isinstance(b, dict) else {}
+            # Token likely expired/invalid (or transient non-200) -> drop it and
+            # re-mint on the next pass.
+            self._op = self._tok = None
+        return None
+
+    def current_balance(self):
+        """This account's OWN current_balance via the cached session (float | None) —
+        identical value to the module-level current_balance(email, pwd)."""
+        b = self._get("/v1/user")
+        if b is None:
+            return None
+        user = b.get("user", b)
+        cb = user.get("current_balance")
+        return float(cb) if cb is not None else None
+
+    def jar_balance_by_name(self, name):
+        """The named jar's balance (accumulated_amount) read via THIS (parent) session's
+        cached token — jars have no loginable identity, so they are read through the
+        parent. Identical value to the module-level jar_balance_by_name(...). float | None."""
+        b = self._get("/jars/v1/users")
+        if b is None:
+            return None
+        for j in b.get("jar_users", []) or []:
+            if j.get("name") == name:
+                amt = j.get("accumulated_amount")
+                return float(amt) if amt is not None else None
+        return None
 
 
 # ---- recipe builders -------------------------------------------------------
@@ -229,7 +338,14 @@ def tiered_user(email, first, plan_identifier="regular", portfolio_name="Aggress
     """A funded user on a specific PLAN TIER. plan_identifier is the backend Plan enum
     value: 'starter' (the app's "Lite" plan), 'regular', or 'plus'. NOTE: 'lite' is
     NOT a valid identifier (gen API 422 'Trait not registered: lite') — use 'starter'.
-    Starter only permits Conservative/Moderately Conservative/Moderate portfolios."""
+    Starter only permits Conservative/Moderately Conservative/Moderate portfolios.
+
+    WARNING — the plan EXPIRES 5 DAYS after seeding: with_active_plan creates its
+    user_plan via the backend factory default `end_at { 5.days.from_now }`
+    (spec/factories/user_plan.rb), after which /v1/plans reports current_plan false
+    on every entry (verified live 2026-07-14). Fine for throwaway users; for LONG-
+    LIVED tier fixtures use genuser_fixtures._tier_rows, which seeds an explicit
+    non-expiring user_plan row instead of the trait."""
     u = funded_user(email, first)
     u["attributes"]["plan_identifier"] = plan_identifier
     u["attributes"]["portfolio_name"] = portfolio_name
