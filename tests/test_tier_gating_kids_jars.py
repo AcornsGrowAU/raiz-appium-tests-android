@@ -70,6 +70,17 @@ DATA: reuse the provisioned fixtures `plan_lite` (starter/"Lite") + `plan_regula
   balance is NOT load-bearing here (manifest FLAG 1: the $100 ACH does not settle on
   Starter); we read the PLAN, not the balance.
 
+  FIXTURE-LIFECYCLE NOTE (incident 2026-07-14): tier fixtures seeded via the stock
+  `with_active_plan` trait EXPIRE — the backend user_plan factory defaults
+  `end_at { 5.days.from_now }` (spec/factories/user_plan.rb), so a reused fixture
+  older than 5 days reports current_plan=false on EVERY /v1/plans entry (n_active=0)
+  while still logging in, and the can_login reuse gate never heals it. The fixtures
+  are therefore seeded DURABLY via genuser_fixtures._tier_rows (explicit user_plan
+  row, end_at 2099-01-01 — verified live: fresh stock seed decays, durable seed
+  holds). If n_active==0 fires again on a reused fixture, the registry entry was
+  re-seeded through a non-durable path: delete the plan_* entries from
+  fixtures/genuser_registry.json and re-run.
+
 COMPANION HALF (DEFERRED, on-device): "Lite create-entry disabled / upgrade-routed" —
   drive the Lite user to the Kids/Jars create entry and assert the upgrade route
   (raiz Kotlin: the create CTA is gated behind the plan-upgrade flow). Needs the
@@ -152,12 +163,19 @@ def test_tier_gating_kids_jars_entitlement_state():
     assert ctrl_n != -1, f"could not read /v1/plans for the Regular fixture {ctrl['email']}"
 
     # (1) Well-formed entitlement: each user has EXACTLY ONE active plan.
+    #     n_active==0 on a REUSED fixture is the known 5-day user_plan-expiry rot
+    #     (see FIXTURE-LIFECYCLE NOTE in the module docstring): heal by deleting the
+    #     plan_* registry entries so the durable _tier_rows builder re-seeds.
     assert lite_n == 1, (
         f"Lite user does not have exactly one active plan (n_active={lite_n}); "
-        f"entitlement state is ambiguous — offered {lite_all}")
+        f"entitlement state is ambiguous — offered {lite_all}. "
+        f"(reused={lite.get('reused')}; if reused and n_active==0, the fixture's "
+        f"user_plan expired — stale non-durable seed; see module docstring.)")
     assert ctrl_n == 1, (
         f"Regular user does not have exactly one active plan (n_active={ctrl_n}); "
-        f"entitlement state is ambiguous — offered {ctrl_all}")
+        f"entitlement state is ambiguous — offered {ctrl_all}. "
+        f"(reused={ctrl.get('reused')}; if reused and n_active==0, the fixture's "
+        f"user_plan expired — stale non-durable seed; see module docstring.)")
 
     # (2) Lite user is on the STARTER ('Lite') tier -> Kid/Jar allowed_count == 0 ->
     #     kids & jars are upgrade-GATED (the gate the case is about).

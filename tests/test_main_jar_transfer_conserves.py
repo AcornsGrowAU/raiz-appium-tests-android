@@ -20,7 +20,9 @@ WHY API-LAYER, AND WHY ONE create:
   User balances; the Kid User is not party to it. The PROVEN test-data plumbing only
   references entities created in the SAME payload (@user_1 refs), so the whole
   scenario — the seeded balances AND the transfer's two ledger legs — is built in a
-  SINGLE create, then read back per sub-account:
+  SINGLE create, then read back per account (Main/Kid via their own logins; the Jar
+  — which has NO loginable identity, a jar-email login 401s by design — by NAME via
+  the parent session's jars API, accumulated_amount == the jar's balance):
 
     Main:  credit M0,  WITHDRAW T   -> settles to  M0 - T   (Owner side of the move)
     Jar :  credit J0,  credit  T    -> settles to  J0 + T   (Jar side of the move)
@@ -50,8 +52,8 @@ import time
 import pytest
 
 from utils.genuser_api import (
-    gen_create, current_balance, funded_user, jar_user, kid_user,
-    ach_credit, ach_withdrawal,
+    gen_create, current_balance, funded_user, jar_balance_by_name, jar_user,
+    kid_user, ach_credit, ach_withdrawal,
 )
 
 pytestmark = pytest.mark.value_api
@@ -78,21 +80,29 @@ SUM_BAND = 3 * BAND
 SETTLE_BUDGET_S = int(os.getenv("SETTLE_BUDGET_S", "480"))
 POLL_INTERVAL_S = int(os.getenv("POLL_INTERVAL_S", "20"))
 
+# The seeded jar card's name — jars have NO loginable identity (a jar-email login
+# 401s by design), so the jar leg is read by THIS name via the PARENT session
+# (jar_balance_by_name -> accumulated_amount == the jar's own balance).
+JAR_NAME = "QA Conserve Xfer Jar"
+
 # If the backend ever re-introduces the deterministic jar-withdrawal balance gate, the
 # create 422s on one of these signatures — fail loudly, never mask (see file header).
 _WD_GATE_KEYS = ("exceed", "insufficient", "greater than", "available balance")
 
 
-def _poll(email, target):
-    """Poll current_balance until it settles within BAND of target (or budget out).
+def _poll(read, label, target):
+    """Poll a balance reader until it settles within BAND of target (or budget out).
+    `read` is a zero-arg callable returning float|None — Main/kid read their own
+    current_balance via their own login; the jar (no loginable identity) reads its
+    accumulated_amount via the PARENT session (jar_balance_by_name).
     Returns (best_seen, settled_bool)."""
     waited, best, seen_any = 0, None, False
     while waited <= SETTLE_BUDGET_S:
-        bal = current_balance(email)
+        bal = read()
         if bal is not None:
             seen_any = True
             best = bal if best is None else (bal if abs(bal - target) < abs(best - target) else best)
-            print(f"  [poll {email} +{waited}s] current_balance={bal} (target ${target})")
+            print(f"  [poll {label} +{waited}s] balance={bal} (target ${target})")
             if abs(bal - target) <= BAND:
                 return bal, True
         time.sleep(POLL_INTERVAL_S)
@@ -121,7 +131,7 @@ def test_owner_to_jar_transfer_conserves_total_and_leaves_kid_unchanged():
     # Kid is funded once and never touched.
     payload = {
         "user_1": funded_user(parent_email, f"ConsXfer{ts}"),
-        "jar_1": jar_user(jar_email, f"ConsXferJar{ts}", "@user_1", "QA Conserve Xfer Jar"),
+        "jar_1": jar_user(jar_email, f"ConsXferJar{ts}", "@user_1", JAR_NAME),
         "kid_1": kid_user(kid_email, f"ConsXferKid{ts}", "@user_1"),
         # Main: starting balance then the Owner leg of the transfer (a withdrawal of T)
         "main_credit": ach_credit("@user_1", MAIN_START),
@@ -151,13 +161,17 @@ def test_owner_to_jar_transfer_conserves_total_and_leaves_kid_unchanged():
     print(f"  seeded Main(${MAIN_START}-${TRANSFER}) Jar(${JAR_START}+${TRANSFER}) "
           f"Kid(${KID_START}); pre-transfer total ${PRE_TOTAL}")
 
-    # Read back each sub-account's settled balance (each is its own User -> own token).
-    main_after, main_ok = _poll(parent_email, MAIN_AFTER)
-    jar_after, jar_ok = _poll(jar_email, JAR_AFTER)
-    kid_after, kid_ok = _poll(kid_email, KID_START)
+    # Read back each account's settled balance: Main/kid via their own logins (own
+    # token); the jar (no loginable identity) by NAME via the PARENT session.
+    main_after, main_ok = _poll(lambda: current_balance(parent_email), "main", MAIN_AFTER)
+    jar_after, jar_ok = _poll(
+        lambda: jar_balance_by_name(parent_email, JAR_NAME), f"jar '{JAR_NAME}'", JAR_AFTER)
+    kid_after, kid_ok = _poll(lambda: current_balance(kid_email), "kid", KID_START)
 
     assert main_ok, f"Main never settled to ${MAIN_AFTER} (best seen ${main_after})"
-    assert jar_ok, f"Jar never settled to ${JAR_AFTER} (best seen ${jar_after})"
+    assert jar_ok, (
+        f"Jar never settled to ${JAR_AFTER} (best seen ${jar_after}; read via the "
+        f"parent session's jars API, jar '{JAR_NAME}')")
     assert kid_ok, f"Kid never settled to ${KID_START} (best seen ${kid_after})"
 
     # (1) CONSERVATION: post-transfer sum == pre-transfer sum (nothing created/destroyed).

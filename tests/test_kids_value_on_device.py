@@ -129,8 +129,13 @@ def test_kid_card_values_match_seeded_and_siblings_distinct():
         f"seeded kid balances are not materially distinct (A=${bal_a}, B=${bal_b}); "
         f"the sibling-isolation oracle needs them to differ")
 
-    opts = get_android_options(no_reset=False)  # fresh app data: log in cleanly as the parent
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data: log in cleanly as the parent
     opts.udid = UDID
+    # Disable the MJPEG screenshot broadcaster on this test-owned secondary session:
+    # a 2nd broadcaster on the 2GB emulator is the documented OOM tipping point
+    # (matches test_allocation_jars_kids_e2e). Failure screenshots are unaffected —
+    # conftest _grab uses the W3C get_screenshot_as_png path, not MJPEG.
+    opts.set_capability("mjpegServerPort", 0)
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:
         # No blind post-create sleep: _login_as_parent polls the splash (up to 15s)

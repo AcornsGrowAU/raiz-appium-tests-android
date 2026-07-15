@@ -21,7 +21,9 @@ This file now splits along that data boundary:
     PARENT, and open the populated Jars LIST so is_list_screen() is genuinely true
     and the balance / tab / Manage oracles actually run. The balance oracle reads
     the NAMED jar's value via JarsPage.get_jar_balance_by_name (not a screen-wide
-    '$' scrape) and reconciles it against that jar's own backend current_balance,
+    '$' scrape) and reconciles it against that jar's backend balance
+    (accumulated_amount, read via the PARENT's session with jar_balance_by_name —
+    jars are sub-accounts with NO loginable identity of their own),
     and asserts the two sibling jars render DISTINCT values — the presence-only
     weakness a bare existence check can't catch.
 
@@ -43,7 +45,7 @@ from pages.home_page import HomePage
 from pages.jars_page import JarsPage
 from utils.deep_links import DeepLinks
 from utils.assertions import assert_non_negative_money, parse_money
-from utils.genuser_api import current_balance
+from utils.genuser_api import jar_users
 from utils.genuser_fixtures import (
     get_or_create_fixture_user, mark_onboarded, JAR_A_NAME, JAR_B_NAME,
 )
@@ -145,26 +147,40 @@ class TestJarsListScreen:
     @pytest.fixture(scope="class")
     def jars_list(self):
         fx = get_or_create_fixture_user("jars_siblings_distinct")  # reused if seeded
-        jar_a_email = "a." + fx["email"]
-        jar_b_email = "b." + fx["email"]
-        bal_a = current_balance(jar_a_email)
-        bal_b = current_balance(jar_b_email)
-        assert bal_a and bal_a > 0, f"jar-A has no backend balance: {bal_a}"
-        assert bal_b and bal_b > 0, f"jar-B has no backend balance: {bal_b}"
+        # Jars are sub-accounts with NO loginable identity (their /v1/sessions
+        # 401s by design), so read each NAMED jar's balance (accumulated_amount)
+        # through the PARENT's session. EFF-02: fetch the parent's jar list ONCE
+        # and index by name, instead of two jar_balance_by_name calls (each a
+        # separate parent login + jars GET against the rate-limited endpoint).
+        _jar_bal = {
+            j["name"]: float(j["accumulated_amount"])
+            for j in (jar_users(fx["email"]) or [])
+            if isinstance(j, dict) and j.get("name") is not None
+            and j.get("accumulated_amount") is not None
+        }
+        bal_a = _jar_bal.get(JAR_A_NAME)
+        bal_b = _jar_bal.get(JAR_B_NAME)
+        assert bal_a and bal_a > 0, (
+            f"parent-session read returned no balance for jar {JAR_A_NAME!r}: {bal_a}")
+        assert bal_b and bal_b > 0, (
+            f"parent-session read returned no balance for jar {JAR_B_NAME!r}: {bal_b}")
 
-        opts = get_android_options(no_reset=False)  # fresh app data: log in cleanly
+        opts = get_android_options(no_reset=False, secondary=True)  # fresh app data: log in cleanly
         opts.udid = UDID
         # This class opens its OWN UiAutomator2 session while the conftest `driver`
         # session (used by TestJarsCreateScreen) is still alive in the same process
-        # and pytest run. get_android_options() reads ANDROID_SYSTEM_PORT /
-        # ANDROID_MJPEG_PORT from the env, so without an offset our second session
-        # would request the SAME systemPort the conftest session already holds and
-        # the UiAutomator2 server would refuse to start ("local port ... is busy").
-        # Offset both host ports so the two sessions on this one device don't collide.
+        # and pytest run. get_android_options() reads ANDROID_SYSTEM_PORT from the
+        # env, so without an offset our second session would request the SAME
+        # systemPort the conftest session already holds and the UiAutomator2 server
+        # would refuse to start ("local port ... is busy"). Offset the systemPort so
+        # the two sessions on this one device don't collide.
         _sys = int(os.getenv("ANDROID_SYSTEM_PORT", "8200"))
-        _mjpeg = int(os.getenv("ANDROID_MJPEG_PORT", "7810"))
         opts.set_capability("systemPort", _sys + 50)
-        opts.set_capability("mjpegServerPort", _mjpeg + 50)
+        # Disable the MJPEG screenshot broadcaster on this test-owned secondary
+        # session: a 2nd broadcaster on the 2GB emulator is the documented OOM
+        # tipping point (matches test_allocation_jars_kids_e2e). Failure screenshots
+        # are unaffected — conftest _grab uses W3C get_screenshot_as_png, not MJPEG.
+        opts.set_capability("mjpegServerPort", 0)
         d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
         jars = JarsPage(d)
         try:

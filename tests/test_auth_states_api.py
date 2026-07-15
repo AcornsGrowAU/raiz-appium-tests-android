@@ -113,7 +113,10 @@ def _closed_at(email):
 
 
 def _ts():
-    return str(int(time.time()))
+    # PID-qualified timestamp: avoid same-second email collisions when the suite
+    # runs across the parallel multi-emulator rig / reruns (each worker is a
+    # distinct process). Mirrors test_auth_account_states_api.py:106.
+    return f"{int(time.time())}.{os.getpid()}"
 
 
 def test_closed_account_authenticates_and_reflects_closed_at():

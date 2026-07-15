@@ -24,7 +24,7 @@ from pages.home_page import HomePage
 @pytest.fixture
 def fresh_driver():
     """Force-stops the app and starts a fresh session (noReset=False)."""
-    opts = get_android_options(no_reset=False) if PLATFORM == "android" else get_ios_options(no_reset=False)
+    opts = get_android_options(no_reset=False, secondary=True) if PLATFORM == "android" else get_ios_options(no_reset=False)
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     yield d
     d.quit()

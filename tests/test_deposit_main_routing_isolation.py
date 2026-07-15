@@ -9,8 +9,11 @@ Oracle (backlog row + notes):
 Why API-layer-first (notes + manifest): deterministic, no device. The ROUTING of a
 deposit is decided in the backend — a credit_investment is attributed to exactly ONE
 user (the @ref it names), so a deposit routed at Main has no path to touch the jar/kid
-sub-accounts (each a distinct user with its own current_balance). This proves the
-isolation invariant directly against backend ground truth. The on-device deposit leg
+sub-accounts (each a distinct user with its own balance). The kid balance is read via
+its own login (kids can log in); the jar has NO loginable identity (a jar-email login
+401s by design), so its balance (accumulated_amount) is read by NAME via the PARENT
+session's jars API. This proves the isolation invariant directly against backend
+ground truth. The on-device deposit leg
 is a separate concern; the value-isolation invariant is fully provable here.
 
 DETERMINISM — seed a fresh, self-contained rig per run (the proven same-payload @-alias
@@ -44,7 +47,7 @@ import time
 import pytest
 
 from utils.genuser_api import (
-    SEEDED_PWD, ach_credit, ach_credits, current_balance, gen_create,
+    BalanceReader, SEEDED_PWD, ach_credit, ach_credits, gen_create,
     funded_user, jar_user, kid_user,
 )
 from utils.genuser_fixtures import (
@@ -67,53 +70,75 @@ SETTLE_BAND = 1.50
 SETTLE_BUDGET_S = int(os.getenv("SETTLE_BUDGET_S", "360"))
 POLL_INTERVAL_S = int(os.getenv("POLL_INTERVAL_S", "20"))
 
+# The seeded jar card's name — jars have NO loginable identity (a jar-email login
+# 401s by design), so the jar leg is read by THIS name via the PARENT session
+# (jar_balance_by_name -> accumulated_amount == the jar's own balance).
+JAR_NAME = "QA Route Jar"
+
 
 def _ts():
     return str(int(time.time()))
 
 
-def _poll_until(email, target, budget_s):
-    """Poll current_balance for `email` until it lands within SETTLE_BAND of `target`
-    (or the budget runs out). Returns (best_seen, settled_bool). Used for the SOFT Main
-    leg, where ~base+$10 is the expected target."""
-    waited, best = 0, 0.0
+def _interleaved_settle(parent_reader, main_target, jar_name, jar_seed,
+                        kid_reader, kid_seed, budget_s):
+    """Settle Main + jar + kid in ONE interleaved loop under a SINGLE shared budget,
+    reading through mint-once cached-token readers.
+
+    WHY MERGED (reliability): the old shape ran three SERIAL per-account polls, each with
+    its OWN full budget and each re-logging-in (current_balance()/jar_balance_by_name()
+    mint a fresh /v1/sessions token) on EVERY iteration — dozens of redundant logins for
+    the same handful of accounts, which both causes and gets tripped by /v1/sessions
+    rate-limiting. Here one `parent_reader` login serves BOTH the Main /v1/user read and
+    the jar /jars/v1/users read, and one `kid_reader` login serves the kid; both are
+    re-minted only on a rejected read. All three accounts are polled together within the
+    SAME budget window instead of end-to-end.
+
+    Each account's settle CRITERION is UNCHANGED from the old per-account polls; only the
+    scheduling is merged:
+      - Main (SOFT leg): settled == within SETTLE_BAND of `main_target` (~base+$10).
+      - jar / kid (LOAD-BEARING): landed == balance reaches AT LEAST its own seed
+        (>= seed - DELTA_EPS). This is deliberately NOT a band-poll around `seed`: the
+        jar/kid are the isolation oracle, and a routing LEAK would push a sub-account to
+        seed+$10, which a band around `seed` would NEVER mark settled — the test would
+        SKIP ("base ACH did not settle") and silently MASK the leak it exists to catch.
+        Gating on ">= seed" lets a leaked sub-account CLEAR the gate and then FAIL the
+        exact delta==0 assertion, while a genuinely lagging base ACH still skips honestly.
+        Balances only rise on an inbound credit and a seeded ACH settles to EXACTLY its
+        amount, so ">= seed" is a sound "base landed" signal that does not pre-judge delta.
+
+    Returns (main_best, main_settled, jar_best, jar_settled, kid_best, kid_settled);
+    each *_best is the max balance seen (0.0 if never read)."""
+    waited = 0
+    main_best = jar_best = kid_best = 0.0
+    main_settled = jar_settled = kid_settled = False
     while waited <= budget_s:
-        bal = current_balance(email, SEEDED_PWD)
-        if bal is not None:
-            best = max(best, bal)
-            print(f"  [poll {email.split('@')[0]} +{waited}s] current_balance={bal} (target ~{target})")
-            if abs(bal - target) <= SETTLE_BAND:
-                return best, True
+        if not main_settled:
+            bal = parent_reader.current_balance()
+            if bal is not None:
+                main_best = max(main_best, bal)
+                print(f"  [poll main +{waited}s] current_balance={bal} (target ~{main_target})")
+                if abs(bal - main_target) <= SETTLE_BAND:
+                    main_settled = True
+        if not jar_settled:
+            bal = parent_reader.jar_balance_by_name(jar_name)
+            if bal is not None:
+                jar_best = max(jar_best, bal)
+                print(f"  [poll jar '{jar_name}' +{waited}s] balance={bal} (seed {jar_seed})")
+                if bal >= jar_seed - DELTA_EPS:
+                    jar_settled = True
+        if not kid_settled:
+            bal = kid_reader.current_balance()
+            if bal is not None:
+                kid_best = max(kid_best, bal)
+                print(f"  [poll kid +{waited}s] balance={bal} (seed {kid_seed})")
+                if bal >= kid_seed - DELTA_EPS:
+                    kid_settled = True
+        if main_settled and jar_settled and kid_settled:
+            break
         time.sleep(POLL_INTERVAL_S)
         waited += POLL_INTERVAL_S
-    return best, False
-
-
-def _poll_until_seed_landed(email, seed, budget_s):
-    """Poll current_balance for `email` until its OWN base ACH has LANDED — i.e. the
-    balance reaches AT LEAST its seed (minus a cent of float tolerance), or the budget
-    runs out. Returns (best_seen, landed_bool).
-
-    CRITICAL (why this is NOT a band-poll like the Main leg): the jar/kid are the
-    load-bearing isolation oracle. A routing LEAK would push a sub-account to seed+$10,
-    which a band-poll around `seed` (tolerance ${SETTLE_BAND}) would NEVER mark settled
-    — so the test would SKIP ("base ACH did not settle") and silently MASK the very leak
-    it exists to catch. Gating on ">= seed" instead means a leaked sub-account clears the
-    gate (it is >= seed) and then FAILS the exact delta==0 assertion, while a genuinely
-    lagging base ACH (never reaches seed) still skips honestly. Balances only ever rise on
-    an inbound credit, and a seeded ACH settles to EXACTLY its amount, so ">= seed" is a
-    sound "base landed" signal that does not pre-judge the delta."""
-    waited, best = 0, 0.0
-    while waited <= budget_s:
-        bal = current_balance(email, SEEDED_PWD)
-        if bal is not None:
-            best = max(best, bal)
-            print(f"  [poll {email.split('@')[0]} +{waited}s] current_balance={bal} (seed {seed})")
-            if bal >= seed - DELTA_EPS:
-                return best, True
-        time.sleep(POLL_INTERVAL_S)
-        waited += POLL_INTERVAL_S
-    return best, False
+    return main_best, main_settled, jar_best, jar_settled, kid_best, kid_settled
 
 
 def test_deposit_into_main_does_not_move_jar_or_kid():
@@ -137,7 +162,7 @@ def test_deposit_into_main_does_not_move_jar_or_kid():
     payload = {
         "user_1": funded_user(main_email, f"RouteMain{ts}"),
         **ach_credits("@user_1", main_base, prefix="mainbase"),
-        "jar_1": jar_user(jar_email, f"RouteJar{ts}", "@user_1", "QA Route Jar"),
+        "jar_1": jar_user(jar_email, f"RouteJar{ts}", "@user_1", JAR_NAME),
         **ach_credits("@jar_1", jar_seed, prefix="jarbase"),
         "kid_1": kid_user(kid_email, f"RouteKid{ts}", "@user_1"),
         **ach_credits("@kid_1", kid_seed, prefix="kidbase"),
@@ -154,19 +179,26 @@ def test_deposit_into_main_does_not_move_jar_or_kid():
     print(f"  created rig: Main {created['user_1']['id']} (base ${main_base} + ${DEPOSIT} "
           f"routed), Jar {created['jar_1']['id']} (${jar_seed}), Kid {created['kid_1']['id']} (${kid_seed})")
 
-    # --- Settle MAIN first (gives the whole rig the full async window). If Main never
-    # settles we still hold the load-bearing isolation oracle below (it is the SOFT leg). ---
-    main_best, main_settled = _poll_until(main_email, main_target, SETTLE_BUDGET_S)
-
-    # ============================ LOAD-BEARING ============================
-    # The jar and kid were never referenced by the deposit. Each must settle to EXACTLY
-    # its own seeded balance — a Main deposit leaks nothing into a sub-account.
-    jar_bal, jar_settled = _poll_until_seed_landed(jar_email, jar_seed, SETTLE_BUDGET_S)
-    kid_bal, kid_settled = _poll_until_seed_landed(kid_email, kid_seed, SETTLE_BUDGET_S)
+    # --- Settle all three accounts in ONE interleaved loop under a SINGLE shared budget,
+    # reading through mint-once cached-token readers (one parent login serves BOTH the
+    # Main /v1/user and the jar /jars/v1/users reads; one kid login serves the kid). This
+    # replaces three serial per-account budgets that each re-logged-in every iteration and
+    # tripped /v1/sessions rate-limiting. Main is the SOFT band leg; the jar and the kid
+    # are the LOAD-BEARING isolation oracle (each gated ">= its own seed", never a band
+    # around the seed, so a routing LEAK to seed+$10 clears the gate and FAILS the exact
+    # delta==0 assertion rather than being masked as an unsettled skip). The kid reads via
+    # its own login; the jar (no loginable identity) reads by name via the PARENT session.
+    parent_reader = BalanceReader(main_email, SEEDED_PWD)
+    kid_reader = BalanceReader(kid_email, SEEDED_PWD)
+    (main_best, main_settled, jar_bal, jar_settled,
+     kid_bal, kid_settled) = _interleaved_settle(
+        parent_reader, main_target, JAR_NAME, jar_seed,
+        kid_reader, kid_seed, SETTLE_BUDGET_S)
 
     if jar_bal is None or kid_bal is None:
         pytest.skip("skip-with-reason: could not read jar/kid balances back "
-                    "(login/settle gate, not a product result)")
+                    "(kid own-login read / jar parent-session read — a login/settle "
+                    "gate, not a product result)")
 
     jar_delta = round(jar_bal - jar_seed, 2)
     kid_delta = round(kid_bal - kid_seed, 2)

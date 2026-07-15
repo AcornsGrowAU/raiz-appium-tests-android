@@ -259,7 +259,7 @@ def test_created_jar_name_persists_on_list_card():
     contentDescription = null); the true icon-identity read-back is the explicit
     skip below."""
     fx = _fresh_user()
-    opts = get_android_options(no_reset=False)
+    opts = get_android_options(no_reset=False, secondary=True)
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:

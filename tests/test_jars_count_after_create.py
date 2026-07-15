@@ -136,7 +136,7 @@ def test_home_jars_count_increments_after_create():
     (RAIZ-10355). Fresh generated user (0 jars baseline), own driver. Asserts the
     real value (count == before + 1), not mere presence."""
     fx = _fresh_user()
-    opts = get_android_options(no_reset=False)
+    opts = get_android_options(no_reset=False, secondary=True)
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:

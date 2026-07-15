@@ -135,6 +135,11 @@ class TestLumpSumInvestmentE2E:
         _open_deep_link(driver, DeepLinks.TRANSACTIONS)
         history = TransactionHistoryPage(driver)
         assert history.is_loaded()
+        # Rows arrive async 1-3s after the title mounts; wait for them before the
+        # count read so we don't race the fetch and see a spuriously empty list.
+        # wait_for_rows() returns bool (never asserts) and early-returns on the
+        # first row, so it neither adds time nor changes the oracle below.
+        history.wait_for_rows()
         # A pending Buy should now exist. (Pending section renders before settled.)
         assert history.get_transaction_count() > 0
 

@@ -47,16 +47,18 @@ WHY API-LAYER (no device):
   states are shipped here as an explicit, evidenced skip — never a fake pass.
 
 DATA: the pre-provisioned `jar_progress_ring` fixture (reuse strategy). user_1
-is the parent (the stored login); jar_1 is 'QA Ring Jar' at `jr.<parent-email>`
-with saving_amount $200 and a settled ACH balance of $150. No fresh seed unless
-the stored fixture no longer logs in (handled by get_or_create_fixture_user).
+is the parent (the stored login); jar_1 is 'QA Ring Jar', a SUB-ACCOUNT of the
+parent's main account with saving_amount $200 and a settled ACH balance of $150.
+Jars have NO loginable identity (POST /v1/sessions with a jar email 401s BY
+DESIGN), so every jar read here goes through the PARENT's session. No fresh seed
+unless the stored fixture no longer logs in (handled by get_or_create_fixture_user).
 
 Run (no emulator needed):
   venv/bin/python -m pytest tests/test_jar_goal_progress_ring.py -v -s -o addopts=""
 """
 import pytest
 
-from utils.genuser_api import SEEDED_PWD, call, mint, can_login, current_balance
+from utils.genuser_api import SEEDED_PWD, call, mint, jar_by_name, jar_balance_by_name
 from utils.genuser_fixtures import get_or_create_fixture_user, RING_GOAL, RING_BALANCE, RING_JAR_NAME
 
 pytestmark = [pytest.mark.value_api, pytest.mark.jars]
@@ -66,19 +68,13 @@ NOMINAL_PROGRESS_PCT = round(RING_BALANCE / RING_GOAL * 100, 4)  # 150/200*100 =
 
 # accumulated_amount is a MARKET-PRICED holding value (current_balance ==
 # total_current_amount_for_funds_for_presentation), so it drifts off the seeded
-# $150 by cents as fund unit prices move. Anchor to the seeded LEVEL within a
-# small band: tight enough to catch 0 / garbage / a $150->$15 truncation, loose
-# enough to absorb legitimate repricing (observed drift << 0.5%).
-BALANCE_TOL = max(2.0, RING_BALANCE * 0.02)  # +/- $3 around the seeded $150
+# $150 as fund unit prices move. Reused fixtures live for WEEKS, so drift
+# accumulates well past the once-observed <0.5% (measured 2.25% on 2026-07-13
+# across every jar fixture). Anchor to the seeded LEVEL within a band that
+# absorbs multi-week repricing yet still instantly catches the classes this
+# guard exists for: $0, garbage, and the $150->$15 truncation (all >>8% off).
+BALANCE_TOL = max(5.0, RING_BALANCE * 0.08)  # +/- $12 around the seeded $150
 PCT_TOL = round(BALANCE_TOL / RING_GOAL * 100, 4)  # band on the derived percentage
-
-
-def _jar_email(parent_email):
-    """The fixture seeds the jar at `jr.<parent-email>` (see
-    utils.genuser_fixtures FIXTURES['jar_progress_ring']: jar_user('jr.'+email,...)).
-    Derive it from the stored parent rec so it stays correct if the fixture is
-    ever re-seeded under a new timestamped address."""
-    return "jr." + parent_email
 
 
 def _fetch_jars(parent_email, pwd):
@@ -118,7 +114,7 @@ def test_jar_goal_reads_back_exactly():
     parent = get_or_create_fixture_user(FIXTURE_KEY)
     parent_email, pwd = parent["email"], parent.get("password", SEEDED_PWD)
     print(f"  fixture parent {parent_email} (reused={parent.get('reused')}); "
-          f"ring jar '{RING_JAR_NAME}' at {_jar_email(parent_email)}")
+          f"ring jar '{RING_JAR_NAME}' (sub-account, read via parent session)")
 
     jars = _fetch_jars(parent_email, pwd)
     assert jars is not None, (
@@ -210,47 +206,67 @@ def test_jar_progress_ring_under_target_math():
     )
 
 
-def test_ring_balance_matches_jar_subaccount_login():
-    """Anti-masquerade cross-check: the balance used as the ring numerator is the
-    jar's OWN account balance, readable by logging in AS the jar sub-account
-    (`jr.<parent-email>`) and reading its current_balance — which must equal the
-    accumulated_amount surfaced on the parent's jars list. Confirms the ring is
-    drawn from the real sub-account value, not a parent figure or a stale cache."""
+def test_ring_numbers_match_jar_subaccount_record():
+    """Anti-masquerade cross-check (parent-session): the numbers the ring is drawn
+    from are the jar SUB-ACCOUNT's OWN fields — accumulated_amount (numerator/
+    balance) and saving_amount (denominator/goal) on the jar's record — not a
+    parent figure or a stale cache. Jars have NO loginable identity (POST
+    /v1/sessions with a jar email 401s BY DESIGN), so provenance is validated
+    through the PARENT's session: the shared utils.genuser_api jar readers
+    (jar_by_name / jar_balance_by_name) and this file's own jars-list parser are
+    two independent reads of the same jar record and must agree with each other
+    and with the seeded level."""
     parent = get_or_create_fixture_user(FIXTURE_KEY)
     parent_email, pwd = parent["email"], parent.get("password", SEEDED_PWD)
-    jar_email = _jar_email(parent_email)
 
-    # The jar must be a real, logged-in account in its own right.
-    assert can_login(jar_email, SEEDED_PWD), (
-        f"ring jar sub-account {jar_email} could not log in — fixture not "
-        f"provisioned as expected; cannot validate the numerator's provenance"
+    # The jar must exist as a real sub-account record under the parent.
+    jar_rec = jar_by_name(parent_email, RING_JAR_NAME, pwd)
+    assert jar_rec is not None, (
+        f"jar '{RING_JAR_NAME}' not readable via parent session for "
+        f"{parent_email} (jar_by_name returned None) — fixture not provisioned "
+        f"as expected; cannot validate the ring numbers' provenance"
     )
-    sub_balance = current_balance(jar_email, SEEDED_PWD)
+    # A real sub-account row carries its own identity distinct from the parent.
+    assert jar_rec.get("id"), (
+        f"jar record for '{RING_JAR_NAME}' carries no id — not a real "
+        f"sub-account row: {jar_rec!r}"
+    )
+    sub_balance = jar_balance_by_name(parent_email, RING_JAR_NAME, pwd)
     assert sub_balance is not None, (
-        f"could not read current_balance for jar sub-account {jar_email}"
+        f"could not read the jar sub-account balance (accumulated_amount) for "
+        f"'{RING_JAR_NAME}' via parent session {parent_email}"
     )
 
     jar = _ring_jar(parent_email, pwd)
     assert jar is not None, f"jar '{RING_JAR_NAME}' not found for parent {parent_email}"
     list_balance = float(jar.get("accumulated_amount"))
-    print(f"  jar sub-account current_balance == {sub_balance}; "
-          f"parent-list accumulated_amount == {list_balance}")
+    print(f"  jar_balance_by_name (parent session) == {sub_balance}; "
+          f"this file's jars-list read accumulated_amount == {list_balance}")
 
-    # Same number, two independent reads (sub-account /v1/user vs parent jars list).
-    # Both surface jar_user.current_balance; allow at most a 1-cent slip in case a
-    # market reprice lands between the two consecutive reads (the value is a priced
-    # holding, not a frozen cash sum).
+    # Same number, two independent parent-session reads (shared jar reader vs this
+    # file's own jars-list parser). Both surface jar_user.current_balance; allow at
+    # most a 1-cent slip in case a market reprice lands between the two consecutive
+    # reads (the value is a priced holding, not a frozen cash sum).
     assert abs(sub_balance - list_balance) <= 0.01, (
-        f"ring numerator inconsistency: jar sub-account reports {sub_balance} "
-        f"but parent's jars list reports {list_balance} for the same jar"
+        f"ring numerator inconsistency: jar_balance_by_name reports {sub_balance} "
+        f"but the jars-list read reports {list_balance} for the same jar"
     )
     # Anchored to the seeded LEVEL, not a frozen $150 (priced holding drifts by cents).
     assert abs(sub_balance - float(RING_BALANCE)) <= BALANCE_TOL, (
         f"jar balance must stay at the seeded ~${RING_BALANCE} level "
         f"(tol ±${BALANCE_TOL}), got {sub_balance}"
     )
-    # Distinct accounts: the jar login is not the parent login.
-    assert jar_email != parent_email, "jar and parent must be distinct accounts"
+    # Denominator provenance: the SAME jar record carries the ring's goal, and the
+    # two reads agree on it exactly (saving_amount is settable and non-drifting).
+    assert float(jar_rec.get("saving_amount")) == float(jar.get("saving_amount")), (
+        f"ring denominator inconsistency: jar_by_name reports saving_amount "
+        f"{jar_rec.get('saving_amount')} but the jars-list read reports "
+        f"{jar.get('saving_amount')} for the same jar"
+    )
+    assert float(jar_rec.get("saving_amount")) == float(RING_GOAL), (
+        f"jar sub-account goal must be the seeded ${float(RING_GOAL)}, got "
+        f"{jar_rec.get('saving_amount')}"
+    )
 
 
 @pytest.mark.skip(reason=(

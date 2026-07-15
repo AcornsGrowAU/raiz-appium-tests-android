@@ -208,8 +208,10 @@ class TestHomeGreetingEdgeCases:
             assert token not in greeting, f"Greeting leaks a placeholder ({token!r}): {greeting!r}"
 
     def test_greeting_includes_a_name(self, home):
-        """The greeting should personalise — 'Hello' with nothing after it is the
-        empty-name variant of the same bug. (Greeting renders 'Hello <Name>,'.)"""
-        greeting = home.get_greeting()
-        name = greeting.replace("Hello", "", 1).strip(" ,!.") if "Hello" in greeting else ""
-        assert len(name) > 0, f"Greeting is not personalised (no name): {greeting!r}"
+        """The greeting should personalise — a bare salutation with nothing after
+        it is the empty-name variant of the same bug. (Greeting renders e.g.
+        'Hello <Name>,' on legacy or 'Welcome <Name>' on the redesign.) Derive the
+        name via the page object's get_greeting_name() rather than inline-stripping
+        a single hard-coded 'Hello', so the check holds on both builds."""
+        name = home.get_greeting_name()
+        assert len(name) > 0, f"Greeting is not personalised (no name): {home.get_greeting()!r}"

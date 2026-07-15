@@ -40,10 +40,15 @@ from pages.home_page import HomePage
 from pages.settings_page import SettingsPage
 from utils.deep_links import DeepLinks
 from utils.genuser_fixtures import get_or_create_fixture_user, mark_onboarded
+from conftest import secondary_session_target
 
 pytestmark = [pytest.mark.genuser_e2e, pytest.mark.settings]
 
-UDID = os.getenv("ANDROID_UDID", "emulator-5554")
+# This test owns a SECOND Appium session; it must target THIS xdist worker's
+# device (via conftest.secondary_session_target), not a hardcoded
+# emulator-5554/default-host, so a worker other than gw0 can't stack a 3rd
+# session on gw0's emulator (the ~2GB OOM). Standalone runs supply ANDROID_UDID
+# + APPIUM_HOST and fail-fast if the udid is unset.
 
 # The first name the `presence_funded` fixture builder seeds (genuser_fixtures.py:
 # with_balance_user(email, "PresFunded", ...)). If that builder's name ever
@@ -117,9 +122,10 @@ def test_profile_and_plan_tier_render_real_values():
     assert expected_email and "@" in expected_email, \
         f"fixture user has no usable email: {fx!r}"
 
-    opts = get_android_options(no_reset=False)
-    opts.udid = UDID
-    d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
+    udid, host = secondary_session_target()
+    opts = get_android_options(no_reset=False, secondary=True)
+    opts.udid = udid
+    d = appium_webdriver.Remote(command_executor=host, options=opts)
     try:
         _login_and_home(d, fx)
 
@@ -250,9 +256,10 @@ def test_plan_and_fees_render_exact_fee():
     (seeded on the 'regular' plan); no fresh user per run."""
     fx = get_or_create_fixture_user("presence_funded")
 
-    opts = get_android_options(no_reset=False)
-    opts.udid = UDID
-    d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
+    udid, host = secondary_session_target()
+    opts = get_android_options(no_reset=False, secondary=True)
+    opts.udid = udid
+    d = appium_webdriver.Remote(command_executor=host, options=opts)
     try:
         _login_and_home(d, fx)
 

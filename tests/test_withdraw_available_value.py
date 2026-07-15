@@ -245,7 +245,7 @@ def test_withdraw_available_matches_backend_and_completes():
         f"could not read backend current_balance for {fx['email']} before withdrawal")
     print(f"  backend current_balance: ${balance_before}")
 
-    opts = get_android_options(no_reset=False)
+    opts = get_android_options(no_reset=False, secondary=True)
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:

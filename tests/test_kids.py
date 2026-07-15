@@ -141,13 +141,35 @@ def kids_parent(driver):
     finally:
         # Clear the parent account off the live session and rebuild the shared-account
         # session so later shared-account tests (this file's TestKidsScreen runs
-        # FIRST, but other modules in a full run come after) start clean. Best effort.
-        try:
-            _switch_app_account(driver)
-            if hasattr(driver, "recreate"):
-                driver.recreate()
-        except Exception:
-            pass
+        # FIRST, but other modules in a full run come after) start clean.
+        #
+        # This MUST actually land back on the shared account's Home. The prior bare
+        # try/except: pass could swallow a failed recreate() and silently STRAND the
+        # live session parked as the kids-parent, poisoning every later shared-account
+        # test with wrong-account data. So verify HomePage.is_loaded() after recreate,
+        # retry the recreate ONCE if it didn't come back, and FAIL the finalizer loudly
+        # rather than swallow. No test oracle changes.
+        home = HomePage(driver)
+        recovered = False
+        last_err = None
+        for attempt in range(2):
+            try:
+                _switch_app_account(driver)
+                if hasattr(driver, "recreate"):
+                    driver.recreate()
+                if home.is_loaded(timeout=20):
+                    recovered = True
+                    break
+                last_err = "HomePage.is_loaded() was False after recreate()"
+            except Exception as e:  # noqa: BLE001 — report, then retry/fail loudly
+                last_err = repr(e)
+            print(f"  [kids_parent teardown] shared-account recovery attempt "
+                  f"{attempt + 1} failed: {last_err}")
+        assert recovered, (
+            "kids_parent teardown could not restore the shared-account session to Home "
+            f"after 2 recreate() attempts (last error: {last_err}); the live session may "
+            "be stranded logged in as the kids-parent, which would poison later "
+            "shared-account tests")
 
 
 @pytest.fixture(scope="module")

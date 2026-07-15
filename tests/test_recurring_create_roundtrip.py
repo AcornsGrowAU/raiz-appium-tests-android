@@ -452,7 +452,7 @@ def test_recurring_create_persists_amount_frequency_and_next_date():
     'Next Investment' date renders (shape, part b)."""
     fx = get_or_create_fixture_user("presence_funded")
 
-    opts = get_android_options(no_reset=False)  # fresh app data
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:

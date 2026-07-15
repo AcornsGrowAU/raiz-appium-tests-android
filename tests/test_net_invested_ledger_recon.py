@@ -57,8 +57,8 @@ import time
 import pytest
 
 from utils.genuser_api import (
-    call, mint,
-    gen_create, current_balance, funded_user, ach_credit, ach_withdrawal,
+    BalanceReader, call, mint,
+    gen_create, funded_user, ach_credit, ach_withdrawal,
 )
 
 pytestmark = pytest.mark.value_api
@@ -85,10 +85,17 @@ _WD_GATE_KEYS = ("exceed", "insufficient", "greater than", "available balance")
 
 def _poll_balance(email, target):
     """Poll current_balance until it settles within BAND of target (or budget out).
-    Returns (best_seen, settled_bool)."""
+    Returns (best_seen, settled_bool).
+
+    Reads through a mint-once BalanceReader (one cached /v1/sessions login reused for
+    every poll, re-minted only on a rejected read) instead of re-logging-in on every
+    iteration — the per-call current_balance() login storm both causes and gets tripped
+    by /v1/sessions rate-limiting, which could false-fail this settle gate. The value
+    read (current_balance, None on failure) and the BAND/target oracle are unchanged."""
     waited, best, seen_any = 0, None, False
+    reader = BalanceReader(email)
     while waited <= SETTLE_BUDGET_S:
-        bal = current_balance(email)
+        bal = reader.current_balance()
         if bal is not None:
             seen_any = True
             best = bal if best is None else (

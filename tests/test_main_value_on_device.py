@@ -90,7 +90,7 @@ def test_main_portfolio_card_matches_backend_balance():
     assert backend is not None, f"could not read backend current_balance for {fx['email']}"
     assert backend > 0, f"fixture user has a non-positive backend balance: ${backend}"
 
-    opts = get_android_options(no_reset=False)
+    opts = get_android_options(no_reset=False, secondary=True)
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:

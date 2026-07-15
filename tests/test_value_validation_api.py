@@ -17,6 +17,12 @@ ENV REALITIES handled here:
   - /internal/v1/test_data_generation FLAPS on "rho_settled_at" -> retry the create.
   - /v1/sessions rate-limits bursts (400) -> backoff.
   - balance settles asynchronously -> poll current_balance up to SETTLE_BUDGET_S.
+  - jars are sub-accounts of the main account with NO loginable identity:
+    POST /v1/sessions with a jar's email 401s BY DESIGN. Jar balances are polled
+    via the PARENT's session (jars API accumulated_amount == jar balance) using
+    utils.genuser_api.jar_balance_by_name — never by logging in as the jar.
+    Kids CAN log in (kid_account_data.account_access is true), so kid balances
+    keep the seeded-user login read.
 
 Run (no emulator needed):
   venv/bin/python -m pytest tests/test_value_validation_api.py -v -s -o addopts=""
@@ -29,6 +35,8 @@ import urllib.error
 import urllib.request
 
 import pytest
+
+from utils.genuser_api import jar_balance_by_name, jar_users
 
 pytestmark = pytest.mark.value_api
 
@@ -133,6 +141,33 @@ def _poll_balance(email, target):
     return best, f"did not settle within {SETTLE_BUDGET_S}s"
 
 
+def _poll_jar_balance(parent_email, jar_name, target):
+    """Poll the named jar's balance (accumulated_amount) via the PARENT's session
+    until it settles to ~target or the budget runs out. Jars have NO loginable
+    identity (/v1/sessions with a jar email 401s by design), so the read goes
+    through jar_balance_by_name on the parent — each call mints its own fresh
+    parent token, so mid-poll expiry needs no special handling.
+    Returns (best_balance, status_str)."""
+    if jar_users(parent_email, SEEDED_PWD) is None:
+        return None, ("GATE: could not read jars via the parent session "
+                      f"(parent {parent_email} login/jars-read failed)")
+    waited, best = 0, 0.0
+    while waited <= SETTLE_BUDGET_S:
+        bal = jar_balance_by_name(parent_email, jar_name, SEEDED_PWD)
+        if bal is None:
+            print(f"  [poll +{waited}s] jar '{jar_name}' not readable via parent session yet")
+        else:
+            best = max(best, bal)
+            print(f"  [poll +{waited}s] jar '{jar_name}' accumulated_amount={bal}")
+            # settled only when within band of the EXACT target — works for credits
+            # (balance rises to target) AND withdrawals (balance falls to target).
+            if abs(bal - target) <= BAND:
+                return bal, "settled"
+        time.sleep(POLL_INTERVAL_S)
+        waited += POLL_INTERVAL_S
+    return best, f"did not settle within {SETTLE_BUDGET_S}s"
+
+
 def _ts():
     return str(int(time.time()))
 
@@ -171,8 +206,10 @@ def _ach_withdrawal(user_ref, amount):
 
 
 def _jar_user(parent_ref, email, first, jar_name):
-    """A jar is its own user (jar_account) under a parent. Give it the same balance
-    levers as a main user (Aggressive portfolio + funded) so its ACH credit settles."""
+    """A jar is a jar_account SUB-ACCOUNT under a parent with NO loginable identity
+    (its email is required by the payload schema but /v1/sessions with it 401s by
+    design — read the jar via the parent instead). Give it the same balance levers
+    as a main user (Aggressive portfolio + funded) so its ACH credit settles."""
     return {
         "model": "user",
         "traits": ["jar_account", "has_portfolio", "with_user_profile", "funded", "verified"],
@@ -232,30 +269,32 @@ def test_generated_user_displays_seeded_balance():
 
 
 def test_generated_jar_displays_seeded_balance():
-    """A single funded JAR shows its exact seeded balance. The jar is its own user,
-    so we read it via the jar-user's own token. Confirms the recipe works for a
-    jar_account sub-account, not just a main account."""
+    """A single funded JAR shows its exact seeded balance. Jars have no loginable
+    identity, so the balance is read as accumulated_amount via the PARENT's session
+    (jar_balance_by_name). Confirms the recipe works for a jar_account sub-account,
+    not just a main account."""
     ts = _ts()
     parent_email = f"green.jar.parent.{ts}@emel.xyz"
     jar_email = f"green.jar.{ts}@emel.xyz"
+    jar_name = "QA Green Jar"
     amount = 175.50
     payload = {
         "user_1": _funded_user(parent_email, f"JarParent{ts}"),
-        "jar_user_1": _jar_user("@user_1", jar_email, f"GreenJar{ts}", "QA Green Jar"),
+        "jar_user_1": _jar_user("@user_1", jar_email, f"GreenJar{ts}", jar_name),
         "investment_jar_1": _ach_credit("@jar_user_1", amount),
     }
     status, body = _create(payload)
     assert status == 200, f"create failed: HTTP {status} {body}"
     jar_id = body.get("created", {}).get("jar_user_1", {}).get("id")
     assert jar_id, f"no jar user id in {body}"
-    print(f"  created jar user {jar_id} ({jar_email}) seeded ${amount}")
+    print(f"  created jar user {jar_id} ('{jar_name}') seeded ${amount}")
 
-    bal, state = _poll_balance(jar_email, amount)
+    bal, state = _poll_jar_balance(parent_email, jar_name, amount)
     if state.startswith("GATE"):
         pytest.fail(state)
     assert state == "settled", f"jar balance never settled to ${amount} (best seen ${bal}; {state})"
     assert bal == pytest.approx(amount, abs=BAND), f"seeded ${amount} jar but balance settled to ${bal}"
-    print(f"  PASS: jar current_balance ${bal} == seeded ${amount} (±${BAND})")
+    print(f"  PASS: jar accumulated_amount ${bal} == seeded ${amount} (±${BAND})")
 
 
 def test_jar_balance_equals_sum_of_deposits():
@@ -264,11 +303,12 @@ def test_jar_balance_equals_sum_of_deposits():
     ts = _ts()
     parent_email = f"green.jarsum.parent.{ts}@emel.xyz"
     jar_email = f"green.jarsum.{ts}@emel.xyz"
+    jar_name = "QA Sum Jar"
     amounts = [60.10, 40.00, 25.40]
     total = round(sum(amounts), 2)  # 125.50
     payload = {
         "user_1": _funded_user(parent_email, f"JarSumP{ts}"),
-        "jar_user_1": _jar_user("@user_1", jar_email, f"JarSum{ts}", "QA Sum Jar"),
+        "jar_user_1": _jar_user("@user_1", jar_email, f"JarSum{ts}", jar_name),
     }
     for i, a in enumerate(amounts, 1):
         payload[f"credit_{i}"] = _ach_credit("@jar_user_1", a)
@@ -276,26 +316,27 @@ def test_jar_balance_equals_sum_of_deposits():
     assert status == 200, f"create failed: HTTP {status} {body}"
     print(f"  created jar {body['created']['jar_user_1']['id']} with deposits {amounts} (sum ${total})")
 
-    bal, state = _poll_balance(jar_email, total)
+    bal, state = _poll_jar_balance(parent_email, jar_name, total)
     if state.startswith("GATE"):
         pytest.fail(state)
     assert state == "settled", f"jar sum never settled to ${total} (best seen ${bal}; {state})"
     assert bal == pytest.approx(total, abs=BAND), f"expected sum ${total} but jar balance ${bal}"
-    print(f"  PASS: jar current_balance ${bal} == sum of deposits ${total} (±${BAND})")
+    print(f"  PASS: jar accumulated_amount ${bal} == sum of deposits ${total} (±${BAND})")
 
 
 def test_sibling_jars_hold_distinct_balances():
     """Two jars under one parent each hold their OWN seeded balance — neither leaks
-    into the other (read each jar via its own token)."""
+    into the other (read each jar BY NAME via the parent's session)."""
     ts = _ts()
     parent_email = f"green.jarsib.parent.{ts}@emel.xyz"
     jar_a_email = f"green.jarsib.a.{ts}@emel.xyz"
     jar_b_email = f"green.jarsib.b.{ts}@emel.xyz"
+    jar_a_name, jar_b_name = "QA Jar A", "QA Jar B"
     amt_a, amt_b = 80.00, 120.00
     payload = {
         "user_1": _funded_user(parent_email, f"JarSibP{ts}"),
-        "jar_a": _jar_user("@user_1", jar_a_email, f"JarSibA{ts}", "QA Jar A"),
-        "jar_b": _jar_user("@user_1", jar_b_email, f"JarSibB{ts}", "QA Jar B"),
+        "jar_a": _jar_user("@user_1", jar_a_email, f"JarSibA{ts}", jar_a_name),
+        "jar_b": _jar_user("@user_1", jar_b_email, f"JarSibB{ts}", jar_b_name),
         "credit_a": _ach_credit("@jar_a", amt_a),
         "credit_b": _ach_credit("@jar_b", amt_b),
     }
@@ -304,12 +345,12 @@ def test_sibling_jars_hold_distinct_balances():
     print(f"  created sibling jars: A {body['created']['jar_a']['id']} (${amt_a}), "
           f"B {body['created']['jar_b']['id']} (${amt_b})")
 
-    bal_a, state_a = _poll_balance(jar_a_email, amt_a)
+    bal_a, state_a = _poll_jar_balance(parent_email, jar_a_name, amt_a)
     if state_a.startswith("GATE"):
         pytest.fail(state_a)
     assert state_a == "settled" and bal_a == pytest.approx(amt_a, abs=BAND), \
         f"jar A expected ${amt_a}, got ${bal_a} ({state_a})"
-    bal_b, state_b = _poll_balance(jar_b_email, amt_b)
+    bal_b, state_b = _poll_jar_balance(parent_email, jar_b_name, amt_b)
     assert state_b == "settled" and bal_b == pytest.approx(amt_b, abs=BAND), \
         f"jar B expected ${amt_b}, got ${bal_b} ({state_b})"
     print(f"  PASS: jar A ${bal_a} == ${amt_a}, jar B ${bal_b} == ${amt_b} (distinct, no leak)")
@@ -342,18 +383,20 @@ def test_jar_balance_reduced_by_withdrawal():
     this could only prove the gate, never the reduction. The gate is no longer
     reproducible (see HISTORY above), so this now proves the reduction directly: seed a
     funded jar with a $500 ACH credit + a $200 ACH Withdrawal in one create, then assert
-    the jar's own current_balance settles to exactly the $300 net. A re-introduced
-    backend gate (422 on the balance/exceed signature) hard-fails here so it is never
-    silently masked. Independent cross-check of the same reduction: on-device P1-06.
+    the jar's accumulated_amount (read via the PARENT session — jars cannot log in)
+    settles to exactly the $300 net. A re-introduced backend gate (422 on the
+    balance/exceed signature) hard-fails here so it is never silently masked.
+    Independent cross-check of the same reduction: on-device P1-06.
     """
     ts = _ts()
     parent_email = f"green.jarwd.parent.{ts}@emel.xyz"
     jar_email = f"green.jarwd.{ts}@emel.xyz"
+    jar_name = "QA Withdrawal Jar"
     credit, withdraw = 500.00, 200.00
     net = round(credit - withdraw, 2)  # 300.00
     payload = {
         "user_1": _funded_user(parent_email, f"JarWdP{ts}"),
-        "jar_user_1": _jar_user("@user_1", jar_email, f"JarWd{ts}", "QA Withdrawal Jar"),
+        "jar_user_1": _jar_user("@user_1", jar_email, f"JarWd{ts}", jar_name),
         "credit_1": _ach_credit("@jar_user_1", credit),
         "withdrawal_1": _ach_withdrawal("@jar_user_1", withdraw),
     }
@@ -373,13 +416,13 @@ def test_jar_balance_reduced_by_withdrawal():
     assert status == 200, f"create failed (unexpected non-422): HTTP {status} {body}"
     print(f"  created jar {body['created']['jar_user_1']['id']}: ${credit} credit - ${withdraw} withdrawal -> net ${net}")
 
-    bal, state = _poll_balance(jar_email, net)
+    bal, state = _poll_jar_balance(parent_email, jar_name, net)
     if state.startswith("GATE"):
         pytest.fail(state)
     assert state == "settled", f"net balance never settled to ${net} (best seen ${bal}; {state})"
     assert bal == pytest.approx(net, abs=BAND), \
         f"expected net ${net} ($500-$200) but jar balance ${bal} — withdrawal not reflected?"
-    print(f"  PASS: jar current_balance ${bal} == net ${net} (withdrawal reduced balance)")
+    print(f"  PASS: jar accumulated_amount ${bal} == net ${net} (withdrawal reduced balance)")
 
 
 # ----------------------------- KIDS ------------------------------------------

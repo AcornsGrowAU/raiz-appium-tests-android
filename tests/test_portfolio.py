@@ -167,10 +167,18 @@ class TestMainPortfolioBackNavigationE2E:
         except Exception:
             pass
         main_portfolio.click(locator)
-        left = not main_portfolio.is_visible(main_portfolio.TITLE, timeout=STATE_PROBE_WAIT)
+        # Anchor on the build-agnostic ANY_TITLE (legacy 'Main portfolio' OR the
+        # rebrand 'Invest' OR the headline investment-value label) instead of the
+        # single hard-coded 'Main portfolio' TITLE, which never renders on the
+        # rebranded build — there the old probe read "left" as always-true and the
+        # return assert could never pass. ANY_TITLE makes BOTH sides correct across
+        # builds (equal-or-stronger: the LEFT probe now also demands the rebrand
+        # markers be gone, and the RETURN assert still proves we're back on the
+        # portfolio screen, not exited to Home).
+        left = not main_portfolio.is_visible(main_portfolio.ANY_TITLE, timeout=STATE_PROBE_WAIT)
         assert left, f"Tapping '{label}' should open its own screen"
         driver.back()
-        assert main_portfolio.is_visible(main_portfolio.TITLE), \
+        assert main_portfolio.is_visible(main_portfolio.ANY_TITLE), \
             f"Back from '{label}' must return to Main portfolio, not exit (RAIZ-9994 class)"
 
 

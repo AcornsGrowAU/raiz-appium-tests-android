@@ -270,8 +270,13 @@ def test_jar_goal_roundtrips_exactly_on_device():
         f"before trusting the on-device read"
     )
 
-    opts = get_android_options(no_reset=False)  # fresh app data for a clean login
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data for a clean login
     opts.udid = UDID
+    # Disable the MJPEG screenshot broadcaster on this test-owned secondary session:
+    # a 2nd broadcaster on the 2GB emulator is the documented OOM tipping point
+    # (matches test_allocation_jars_kids_e2e). Failure screenshots are unaffected —
+    # conftest _grab uses the W3C get_screenshot_as_png path, not MJPEG.
+    opts.set_capability("mjpegServerPort", 0)
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:
         try:

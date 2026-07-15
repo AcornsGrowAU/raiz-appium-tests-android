@@ -36,6 +36,28 @@ def _money(s):
         return None
 
 
+def _wait_post_login(d, ho, timeout=30, poll=0.5):
+    """Poll until the post-login transition settles on a terminal screen we can act
+    on: either Home is loaded, or an onboarding screen is on-screen. Replaces a blind
+    `time.sleep(7)` that under-waits on a slow emulator (1-3s RTT) and over-waits on
+    a fast one. Returns 'home' or 'onboarding'; 'unknown' if neither appeared within
+    the timeout (caller still asserts Home as the hard gate). Mirrors
+    test_main_value_on_device._wait_post_login."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if ho.is_loaded(timeout=1):
+            return "home"
+        # Any onboarding gate on screen (PDS/checklist/portfolio/initial-invest all
+        # surface one of these affordances) means we can hand off to onb.complete();
+        # these keywords mirror the taps that complete() makes.
+        src = (d.page_source or "").lower()
+        if any(k in src for k in ("skip", "got it", "select as your portfolio",
+                                  "i consent", "agree")):
+            return "onboarding"
+        time.sleep(poll)
+    return "unknown"
+
+
 def test_fixture_user_logs_in_and_home_renders_balance():
     fx = get_or_create_fixture_user("presence_funded")  # reused if already seeded
     email, pwd, key = fx["email"], fx["password"], fx["key"]
@@ -43,21 +65,24 @@ def test_fixture_user_logs_in_and_home_renders_balance():
     print(f"  fixture '{key}' {email} (reused={fx.get('reused')}) backend balance=${api_balance}")
     assert api_balance and api_balance > 0, f"fixture has no balance: {api_balance}"
 
-    opts = get_android_options(no_reset=False)  # fresh app data
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:
-        time.sleep(5)
         splash, login, home = SplashPage(d), LoginPage(d), HomePage(d)
         if splash.is_present_now(splash.TAGLINE):
             splash.tap_log_in()
-            time.sleep(2)
+        # Wait for the login form rather than a fixed beat; the splash can hand off
+        # slowly on a cold emulator.
+        assert login.is_loaded(timeout=20), "login form did not load"
         login.login(email, pwd)
         print(f"  logged into app as fixture {email}")
-        time.sleep(7)
 
         onb = OnboardingPage(d)
-        if not home.is_present_now(home.TOTAL_VALUE_LABEL):
+        # Poll the post-login transition to a terminal screen instead of a blind
+        # sleep(7) (mirrors test_main_value_on_device._wait_post_login).
+        state = _wait_post_login(d, home)
+        if state != "home" and not home.is_loaded(timeout=2):
             assert onb.complete(), f"onboarding stuck at {onb.path}"
             mark_onboarded(key)
             print(f"  completed onboarding once: {onb.path}")
