@@ -267,3 +267,6 @@ class TestJarsListScreen:
         jars.tap_closed_tab()
         assert jars.is_present_now(jars.CLOSED_TAB), \
             "Closed tab should remain selectable after tapping"
+        # Restore Active so a later test in this module isn't left on Closed
+        # (mirrors test_kids.py::test_closed_tab_tappable).
+        jars.tap_active_tab()

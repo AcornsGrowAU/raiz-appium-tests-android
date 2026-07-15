@@ -45,10 +45,11 @@ class TestRewardsEarnTab:
 
 @pytest.mark.rewards
 class TestRewardsTrackTab:
-    def test_track_tab_navigates(self, rewards):
-        rewards.tap_track_tab()
-        assert rewards.is_visible(rewards.PENDING_REWARDS_LABEL)
-
+    # NOTE: a former test_track_tab_navigates had a body byte-identical to
+    # test_pending_rewards_label_visible below (tap Track → assert Pending label
+    # visible); it was removed as a duplicate (EFF-10). Track *navigation* is
+    # separately and more strongly covered by
+    # TestRewardsTabContentSwitch.test_track_shows_tracked_content_not_just_tab.
     def test_pending_rewards_label_visible(self, rewards):
         rewards.tap_track_tab()
         assert rewards.is_visible(rewards.PENDING_REWARDS_LABEL)
@@ -172,11 +173,15 @@ class TestRewardsEarnValues:
 @pytest.mark.rewards
 class TestRewardsTrackValues:
     def test_pending_and_invested_amounts_well_formed(self, rewards):
+        import re
         rewards.switch_to_track()
         assert rewards.is_track_content_loaded()
         # Pending/Invested summary money must be well-formed and non-negative.
-        amounts = [el.text for el in rewards.driver.find_elements(*rewards.REWARD_AMOUNTS)
-                   if el.text and "$" in el.text]
+        # Mirror the Earn sibling's money-token regex (a digit must follow '$') and
+        # scope to the Track summary, so decorative '$'/'$$' copy is ignored (it is
+        # not a money value) while any real $-amount is still checked.
+        money_token = re.compile(r"\$\s?\d")
+        amounts = [t for t in rewards.get_track_money_texts() if money_token.search(t)]
         if not amounts:
             pytest.skip("No $-denominated tracked-reward amounts rendered")
         for text in amounts:

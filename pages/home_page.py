@@ -157,11 +157,15 @@ class HomePage(BasePage):
         lower cards (Kids/Superannuation) recycle out of the view tree until we
         scroll to their OWN label — scrolling only to 'Main Portfolio' leaves them
         absent from the DOM."""
-        import time
         if self.is_present_now(self.TAB_TODAY):
             try:
                 self.tap_tab_today()
-                time.sleep(0.4)
+                # Bounded settle (≤0.4s ceiling): poll for the Today surface
+                # marker instead of a flat sleep. The account cards sit under
+                # the 'Total investments value' section, which is the Today-tab
+                # surface, so break as soon as it renders; fall through to the
+                # ceiling on builds that drop the label.
+                self.is_present(self.TOTAL_VALUE_LABEL, timeout=0.4)
             except Exception:
                 pass
         # Reset to the top first: scroll_to_text searches forward only, so if a
@@ -254,7 +258,11 @@ class HomePage(BasePage):
         if self.is_present_now(self.TAB_TODAY):
             try:
                 self.tap_tab_today()
-                time.sleep(0.5)
+                # Bounded settle (≤0.5s ceiling): poll for the Today surface
+                # marker ('Total investments value' — the Today-only section the
+                # cards sit under) instead of a flat sleep; break as soon as it
+                # renders.
+                self.is_present(self.TOTAL_VALUE_LABEL, timeout=0.5)
             except Exception:
                 pass
         # scroll_to_text only searches forward; reset to the top so a card left
@@ -262,8 +270,20 @@ class HomePage(BasePage):
         self.scroll_to_top()
         self.scroll_to_text(label)
         self.click(locator)
-        time.sleep(1.2)
-        if self.is_present_now(self.TOTAL_VALUE_LABEL) and self.is_present_now(locator):
+        # Bounded landing poll (≤1.2s ceiling): wait until the tap navigates away
+        # — the tapped card disappears from the tree, or the Home tab bar is gone
+        # — instead of a flat 1.2s sleep; break the moment we leave Home.
+        end = time.time() + 1.2
+        while time.time() < end:
+            if not self.is_present_now(locator) or not self.is_present_now(self.HOME_TABS):
+                break
+            time.sleep(POLL_INTERVAL)
+        # If the first tap registered before the scroll settled we're still on
+        # Home with the card present; retry once. Gate on the Past/Today/Future
+        # tab bar (HOME_TABS) as the still-on-Home signal: it survives scrolling,
+        # whereas the legacy 'Your total investments value' header recycles out of
+        # the tree once the cards scroll and would falsely read as "navigated".
+        if self.is_present_now(self.HOME_TABS) and self.is_present_now(locator):
             self.scroll_to_text(label)
             self.click(locator)
 

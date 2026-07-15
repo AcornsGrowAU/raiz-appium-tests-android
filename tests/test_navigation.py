@@ -101,98 +101,153 @@ class TestDeepLinks:
 
     def test_deep_link_home(self, driver):
         _open_deep_link(driver, DeepLinks.HOME)
-        assert HomePage(driver).is_loaded()
+        page = HomePage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.HOME)
+        assert page.is_loaded()
 
     def test_deep_link_portfolio(self, driver):
         _open_deep_link(driver, DeepLinks.INVEST)
-        assert MainPortfolioPage(driver).is_loaded()
+        page = MainPortfolioPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.INVEST)
+        assert page.is_loaded()
 
     def test_deep_link_performance(self, driver):
         _open_deep_link(driver, DeepLinks.PERFORMANCE)
-        assert PerformancePage(driver).is_loaded()
+        page = PerformancePage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.PERFORMANCE)
+        assert page.is_loaded()
 
     def test_deep_link_jars(self, driver):
         _open_deep_link(driver, DeepLinks.JARS)
-        assert JarsPage(driver).is_loaded()
+        page = JarsPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.JARS)
+        assert page.is_loaded()
 
     def test_deep_link_raiz_kids(self, driver):
         _open_deep_link(driver, DeepLinks.RAIZ_KIDS)
-        assert KidsPage(driver).is_loaded()
+        page = KidsPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.RAIZ_KIDS)
+        assert page.is_loaded()
 
     def test_deep_link_rewards(self, driver):
         _open_deep_link(driver, DeepLinks.REWARDS)
-        assert RewardsPage(driver).is_loaded()
+        page = RewardsPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.REWARDS)
+        assert page.is_loaded()
 
     def test_deep_link_finance(self, driver):
         _open_deep_link(driver, DeepLinks.FINANCE)
-        assert MyFinancePage(driver).is_loaded()
+        page = MyFinancePage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.FINANCE)
+        assert page.is_loaded()
 
     def test_deep_link_transactions(self, driver):
         _open_deep_link(driver, DeepLinks.TRANSACTIONS)
-        assert TransactionHistoryPage(driver).is_loaded()
+        page = TransactionHistoryPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.TRANSACTIONS)
+        assert page.is_loaded()
 
     def test_deep_link_withdraw(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
-        _open_deep_link(driver, DeepLinks.WITHDRAW)
+        withdraw = (AppiumBy.XPATH, "//*[@text='Withdraw']")
+        # ready= lets the opener poll past a late PIN gate that can surface after
+        # the withdraw route resolves (mirrors the coverage-file opener).
+        _open_deep_link(driver, DeepLinks.WITHDRAW,
+                        ready=lambda d: BasePage(d).is_present_now(withdraw))
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Withdraw']"))
+        if not page.is_visible(withdraw, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.WITHDRAW,
+                            ready=lambda d: BasePage(d).is_present_now(withdraw))
+        assert page.is_visible(withdraw)
 
     def test_deep_link_achievements(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[@text='Achievements']")
         _open_deep_link(driver, DeepLinks.ACHIEVEMENTS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Achievements']"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.ACHIEVEMENTS)
+        assert page.is_visible(locator)
 
     def test_deep_link_recurring_investments(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[@text='Recurring investments']")
         _open_deep_link(driver, DeepLinks.RECURRING_INVESTMENTS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Recurring investments']"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.RECURRING_INVESTMENTS)
+        assert page.is_visible(locator)
 
     def test_deep_link_milestone(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[contains(@text,'milestone') or contains(@text,'Milestone')]")
         _open_deep_link(driver, DeepLinks.MILESTONE)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[contains(@text,'milestone') or contains(@text,'Milestone')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.MILESTONE)
+        assert page.is_visible(locator)
 
     def test_deep_link_plans(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[contains(@text,'Plan') or contains(@text,'plan')]")
         _open_deep_link(driver, DeepLinks.PLANS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[contains(@text,'Plan') or contains(@text,'plan')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.PLANS)
+        assert page.is_visible(locator)
 
     def test_deep_link_funding_account(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[contains(@text,'Funding') or contains(@text,'funding')]")
         _open_deep_link(driver, DeepLinks.FUNDING_ACCOUNT)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[contains(@text,'Funding') or contains(@text,'funding')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.FUNDING_ACCOUNT)
+        assert page.is_visible(locator)
 
     def test_deep_link_dividends(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[contains(@text,'Dividend') or contains(@text,'dividend')]")
         _open_deep_link(driver, DeepLinks.DIVIDENDS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[contains(@text,'Dividend') or contains(@text,'dividend')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.DIVIDENDS)
+        assert page.is_visible(locator)
 
     def test_deep_link_fees(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[contains(@text,'Fee') or contains(@text,'fee')]")
         _open_deep_link(driver, DeepLinks.FEES)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[contains(@text,'Fee') or contains(@text,'fee')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.FEES)
+        assert page.is_visible(locator)
 
     def test_deep_link_offsetters(self, driver):
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH, "//*[contains(@text,'Offset')]")
         _open_deep_link(driver, DeepLinks.OFFSETTERS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[contains(@text,'Offset')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.OFFSETTERS)
+        assert page.is_visible(locator)
 
     # ---- Untested registry deep links (each asserts its destination loads) ----
     # These complete the registry coverage. Verified page objects are used where
@@ -206,11 +261,14 @@ class TestDeepLinks:
         # opens the 'Transaction History' transaction list). Verified by crawl.
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[@text='Transaction history' or contains(@text,'Your investing journey') "
+            "or @text='Total invested to date']")
         _open_deep_link(driver, DeepLinks.HISTORY)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[@text='Transaction history' or contains(@text,'Your investing journey') "
-            "or @text='Total invested to date']")), \
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.HISTORY)
+        assert page.is_visible(locator), \
             "raiz://history should open the investing-journey / history summary screen"
 
     def test_deep_link_portfolio_alias(self, driver):
@@ -219,7 +277,10 @@ class TestDeepLinks:
         # that raiz://invest opens. Verified by crawl: lands on PortfolioAllocationPage.
         from pages.portfolio_allocation_page import PortfolioAllocationPage
         _open_deep_link(driver, DeepLinks.PORTFOLIO)
-        assert PortfolioAllocationPage(driver).is_loaded(), \
+        page = PortfolioAllocationPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.PORTFOLIO)
+        assert page.is_loaded(), \
             "raiz://portfolio should open the portfolio allocation breakdown screen"
 
     @pytest.mark.xfail(reason="PRODUCT/REGISTRY FINDING (build 2.39.1d): raiz://performance/day "
@@ -245,18 +306,27 @@ class TestDeepLinks:
     def test_deep_link_raiz_kids_2(self, driver):
         # raiz://raiz_kids_2 → Kids surface (accepts list/consent/welcome entry). HIGH.
         _open_deep_link(driver, DeepLinks.RAIZ_KIDS_2)
-        assert KidsPage(driver).is_loaded()
+        page = KidsPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.RAIZ_KIDS_2)
+        assert page.is_loaded()
 
     def test_deep_link_raiz_super(self, driver):
         # raiz://raiz_super → Raiz Super (any onboarding surface). HIGH (SuperPage verified).
         _open_deep_link(driver, DeepLinks.RAIZ_SUPER)
-        assert SuperPage(driver).is_loaded()
+        page = SuperPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.RAIZ_SUPER)
+        assert page.is_loaded()
 
     def test_deep_link_round_ups(self, driver):
         # raiz://round_ups → Round-Ups dashboard/intro. HIGH (RoundUpsPage verified, linked acct).
         from pages.round_ups_page import RoundUpsPage
         _open_deep_link(driver, DeepLinks.ROUND_UPS)
-        assert RoundUpsPage(driver).is_loaded()
+        page = RoundUpsPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.ROUND_UPS)
+        assert page.is_loaded()
 
     def test_deep_link_round_ups_settings(self, driver):
         # raiz://round_ups/settings → Round-Up settings (RAIZ-9970 area). HIGH (SETTINGS_TITLE verified).
@@ -264,6 +334,9 @@ class TestDeepLinks:
         from pages.round_ups_page import RoundUpsPage
         _open_deep_link(driver, DeepLinks.ROUND_UPS_SETTINGS)
         page = RoundUpsPage(driver)
+        if not (page.is_visible(page.SETTINGS_TITLE, timeout=STATE_PROBE_WAIT)
+                or page.is_visible(page.MINIMUM_AMOUNT_HEADER, timeout=STATE_PROBE_WAIT)):
+            _open_deep_link(driver, DeepLinks.ROUND_UPS_SETTINGS)
         assert page.is_visible(page.SETTINGS_TITLE) or page.is_visible(page.MINIMUM_AMOUNT_HEADER), \
             "Round-Ups settings deep link should open the Round-Up settings screen"
 
@@ -272,6 +345,8 @@ class TestDeepLinks:
         from pages.round_ups_page import RoundUpsPage
         _open_deep_link(driver, DeepLinks.ROUND_UPS_ACCOUNTS)
         page = RoundUpsPage(driver)
+        if not page.is_visible(page.ACCOUNTS_TITLE, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.ROUND_UPS_ACCOUNTS)
         assert page.is_visible(page.ACCOUNTS_TITLE), \
             "Round-Ups accounts deep link should open the linked-accounts screen"
 
@@ -279,39 +354,51 @@ class TestDeepLinks:
         # raiz://rewards_linked_accounts → linked-accounts-for-rewards screen. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Linked accounts') or contains(@text,'linked account') "
+            "or contains(@text,'Rewards')]")
         _open_deep_link(driver, DeepLinks.REWARDS_LINKED_ACCOUNTS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Linked accounts') or contains(@text,'linked account') "
-            "or contains(@text,'Rewards')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.REWARDS_LINKED_ACCOUNTS)
+        assert page.is_visible(locator)
 
     def test_deep_link_rewards_auto(self, driver):
         # raiz://rewards_auto → automatic-rewards settings. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Automatic') or contains(@text,'Auto') or contains(@text,'Rewards')]")
         _open_deep_link(driver, DeepLinks.REWARDS_AUTO)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Automatic') or contains(@text,'Auto') or contains(@text,'Rewards')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.REWARDS_AUTO)
+        assert page.is_visible(locator)
 
     def test_deep_link_rewards_accounts(self, driver):
         # raiz://accounts/rewards → accounts-for-rewards. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'account') or contains(@text,'Account') or contains(@text,'Rewards')]")
         _open_deep_link(driver, DeepLinks.REWARDS_ACCOUNTS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'account') or contains(@text,'Account') or contains(@text,'Rewards')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.REWARDS_ACCOUNTS)
+        assert page.is_visible(locator)
 
     def test_deep_link_financial_insights_accounts(self, driver):
         # raiz://accounts/financial_insights → accounts-for-financial-insights. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'financial insight') or contains(@text,'Financial insight') "
+            "or contains(@text,'account') or contains(@text,'Account')]")
         _open_deep_link(driver, DeepLinks.FINANCIAL_INSIGHTS_ACCOUNTS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'financial insight') or contains(@text,'Financial insight') "
-            "or contains(@text,'account') or contains(@text,'Account')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.FINANCIAL_INSIGHTS_ACCOUNTS)
+        assert page.is_visible(locator)
 
     def test_deep_link_spending_account(self, driver):
         # raiz://spending_account opens the Round-Ups monitored-accounts screen,
@@ -320,79 +407,106 @@ class TestDeepLinks:
         # Verified by crawl.
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Linked accounts') or contains(@text,'Round-Ups') "
+            "or contains(@text,'tracked for Round-Ups')]")
         _open_deep_link(driver, DeepLinks.SPENDING_ACCOUNT)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Linked accounts') or contains(@text,'Round-Ups') "
-            "or contains(@text,'tracked for Round-Ups')]")), \
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.SPENDING_ACCOUNT)
+        assert page.is_visible(locator), \
             "raiz://spending_account should open the Round-Ups linked-accounts screen"
 
     def test_deep_link_invite_friends(self, driver):
         # raiz://invite_friends → refer/invite-a-friend screen. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Invite') or contains(@text,'invite') or contains(@text,'Refer') "
+            "or contains(@text,'refer') or contains(@text,'friend')]")
         _open_deep_link(driver, DeepLinks.INVITE_FRIENDS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Invite') or contains(@text,'invite') or contains(@text,'Refer') "
-            "or contains(@text,'refer') or contains(@text,'friend')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.INVITE_FRIENDS)
+        assert page.is_visible(locator)
 
     def test_deep_link_blog(self, driver):
         # raiz://blog → Money & Markets / blog content. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Blog') or contains(@text,'blog') or contains(@text,'Money') "
+            "or contains(@text,'Market') or contains(@text,'Article') or contains(@text,'News')]")
         _open_deep_link(driver, DeepLinks.BLOG)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Blog') or contains(@text,'blog') or contains(@text,'Money') "
-            "or contains(@text,'Market') or contains(@text,'Article') or contains(@text,'News')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.BLOG)
+        assert page.is_visible(locator)
 
     def test_deep_link_profile_personal(self, driver):
         # raiz://profile/personal → Personal details. WATCH (title inferred from Settings row copy).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Personal') or contains(@text,'personal') or contains(@text,'Profile')]")
         _open_deep_link(driver, DeepLinks.PROFILE_PERSONAL)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Personal') or contains(@text,'personal') or contains(@text,'Profile')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.PROFILE_PERSONAL)
+        assert page.is_visible(locator)
 
     def test_deep_link_profile_financial(self, driver):
         # raiz://profile/financial → Financial details/profile. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Financial') or contains(@text,'financial') or contains(@text,'Profile')]")
         _open_deep_link(driver, DeepLinks.PROFILE_FINANCIAL)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Financial') or contains(@text,'financial') or contains(@text,'Profile')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.PROFILE_FINANCIAL)
+        assert page.is_visible(locator)
 
     def test_deep_link_notifications_settings(self, driver):
         # raiz://notifications_settings → Manage notifications. WATCH (title inferred).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Notification') or contains(@text,'notification')]")
         _open_deep_link(driver, DeepLinks.NOTIFICATIONS_SETTINGS)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Notification') or contains(@text,'notification')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.NOTIFICATIONS_SETTINGS)
+        assert page.is_visible(locator)
 
     def test_deep_link_super_account_info(self, driver):
         # raiz://raiz_super/account_info → Super (account-info onboarding surface). HIGH (any super surface).
         _open_deep_link(driver, DeepLinks.RAIZ_SUPER_ACCOUNT_INFO)
-        assert SuperPage(driver).is_loaded()
+        page = SuperPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.RAIZ_SUPER_ACCOUNT_INFO)
+        assert page.is_loaded()
 
     def test_deep_link_super_important_documents(self, driver):
         # raiz://raiz_super/important_documents → Super docs surface. HIGH (any super surface).
         _open_deep_link(driver, DeepLinks.RAIZ_SUPER_IMPORTANT_DOCS)
-        assert SuperPage(driver).is_loaded()
+        page = SuperPage(driver)
+        if not page.is_loaded(timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.RAIZ_SUPER_IMPORTANT_DOCS)
+        assert page.is_loaded()
 
     def test_deep_link_portfolio_custom(self, driver):
         # raiz://portfolio/custom → custom portfolio allocation. WATCH (title inferred; RAIZ-10251 area).
         from appium.webdriver.common.appiumby import AppiumBy
         from pages.base_page import BasePage
+        locator = (AppiumBy.XPATH,
+            "//*[contains(@text,'Custom') or contains(@text,'custom') or contains(@text,'Portfolio') "
+            "or contains(@text,'portfolio') or contains(@text,'Plus')]")
         _open_deep_link(driver, DeepLinks.PORTFOLIO_CUSTOM)
         page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH,
-            "//*[contains(@text,'Custom') or contains(@text,'custom') or contains(@text,'Portfolio') "
-            "or contains(@text,'portfolio') or contains(@text,'Plus')]"))
+        if not page.is_visible(locator, timeout=STATE_PROBE_WAIT):
+            _open_deep_link(driver, DeepLinks.PORTFOLIO_CUSTOM)
+        assert page.is_visible(locator)
 
 
 @pytest.mark.e2e

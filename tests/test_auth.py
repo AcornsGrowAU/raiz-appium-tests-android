@@ -78,6 +78,56 @@ def _unlock_to_home(driver, pin: PinPage) -> HomePage:
     return home
 
 
+def _became_invisible(driver, locator, timeout=DEFAULT_WAIT) -> bool:
+    """Positive transition wait: True once `locator` has actually left the screen
+    (invisible or absent), False if it's still present after `timeout`.
+
+    Preferred over `not is_visible(...)`: that snapshot passes if the element
+    merely isn't visible at the instant it's read, so it can report navigation
+    BEFORE the transition even begins. This waits for the disappearance to
+    complete, asserting the navigation actually happened. Mirrors base_page's
+    WebDriverWait/EC usage."""
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    from config.settings import POLL_INTERVAL
+    try:
+        return bool(WebDriverWait(driver, timeout, poll_frequency=POLL_INTERVAL).until(
+            EC.invisibility_of_element_located(locator)))
+    except TimeoutException:
+        return False
+
+
+def _parse_bounds(el):
+    """Parse an element's @bounds into (x1, y1, x2, y2), or None."""
+    import re
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", el.get_attribute("bounds") or "")
+    return tuple(int(m.group(i)) for i in (1, 2, 3, 4)) if m else None
+
+
+def _password_toggle_is_real(login) -> bool:
+    """Prove the show/hide control the test taps is a GENUINE password toggle
+    before trusting a reveal/hide reading.
+
+    True when the content-desc-labelled eye is present (Compose-correct), OR when
+    the positional (//Button)[2] fallback sits INSIDE the password field's bounds
+    (a real in-field trailing eye). A chrome Button elsewhere on the form must NOT
+    be able to masquerade as the toggle via the positional fallback."""
+    if login.is_present(login.SHOW_PASSWORD_BUTTON, timeout=STATE_PROBE_WAIT):
+        return True
+    fields = login.driver.find_elements(*login.PASSWORD_FIELD)
+    btns = login.driver.find_elements(*login.SHOW_PASSWORD_BUTTON_FALLBACK)
+    if not fields or not btns:
+        return False
+    fb = _parse_bounds(fields[0])
+    bb = _parse_bounds(btns[0])
+    if not fb or not bb:
+        return False
+    # The fallback button's centre must fall within the password field rectangle.
+    cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+    return fb[0] <= cx <= fb[2] and fb[1] <= cy <= fb[3]
+
+
 @pytest.mark.auth
 @pytest.mark.smoke
 class TestLogin:
@@ -146,7 +196,7 @@ class TestLogin:
         login = LoginPage(fresh_driver)
         assert login.is_loaded()
         login.tap_forgot_password()
-        assert not login.is_visible(login.TITLE, timeout=3), \
+        assert _became_invisible(fresh_driver, login.TITLE, timeout=DEFAULT_WAIT), \
             "Tapping 'Forgot your password?' should navigate to the password-reset flow"
 
 
@@ -250,6 +300,12 @@ class TestPasswordVisibility:
         Asserts an actual state change, not just that a control exists."""
         login = _open_login(fresh_driver)
         login.enter_password(TEST_PASSWORD)
+        # Before trusting a reveal/hide reading, prove the control we tap is a REAL
+        # password toggle — not a chrome button the positional (//Button)[2]
+        # fallback could tap and let masquerade as a toggle.
+        assert _password_toggle_is_real(login), \
+            "Show/hide control must be a genuine password toggle (content-desc eye, " \
+            "or a clickable node inside the password field), not a chrome button"
         login.tap_show_password()
         revealed = login.get_password_value()
         login.tap_show_password()
@@ -271,7 +327,7 @@ class TestForgotPassword:
         asserts we left 'Log in to Raiz' and that an email input is present."""
         login = _open_login(fresh_driver)
         login.tap_forgot_password()
-        assert not login.is_visible(login.TITLE, timeout=STATE_PROBE_WAIT), \
+        assert _became_invisible(fresh_driver, login.TITLE, timeout=DEFAULT_WAIT), \
             "Forgot-password should navigate away from the login form"
         # The reset screen collects an email; the same field locator works if the
         # screen reuses the 'Email address' label. WATCH: reset-screen copy not
@@ -287,7 +343,7 @@ class TestForgotPassword:
         the app recoverable."""
         login = _open_login(fresh_driver)
         login.tap_forgot_password()
-        assert not login.is_visible(login.TITLE, timeout=STATE_PROBE_WAIT)
+        assert _became_invisible(fresh_driver, login.TITLE, timeout=DEFAULT_WAIT)
         login.go_back()
         assert login.is_loaded(), "Back from reset flow should return to the login form"
 

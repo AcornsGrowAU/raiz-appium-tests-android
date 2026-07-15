@@ -217,6 +217,10 @@ def test_profile_and_plan_tier_render_real_values():
         # month"). The fixture is on the 'regular' tier whose monthly fee is
         # exactly $5.50. Assert that exact value — not mere presence of a fee
         # keyword (which any dollar figure would satisfy).
+        # Let the fee value hydrate (it can populate after the static labels) —
+        # folded in from the retired test_plan_and_fees_render_exact_fee so this
+        # survivor keeps that test's fee-render hydration wait before reading.
+        plans.wait_for_value("$5.50", timeout=DEFAULT_WAIT)
         fee = plans.current_monthly_fee()
         print(f"  monthly fee rendered: {fee!r}")
         assert fee is not None, (
@@ -230,61 +234,6 @@ def test_profile_and_plan_tier_render_real_values():
             f"got {fee!r}; texts: {plans.visible_texts()!r}"
         )
         print(f"  PASS: monthly fee {fee!r} is the exact regular-tier value")
-    finally:
-        try:
-            d.quit()
-        except Exception:
-            pass
-
-
-def test_plan_and_fees_render_exact_fee():
-    """The pricing-plans surface (raiz://plans) renders the EXACT monthly fee for
-    the current ('regular') tier — '$5.50' — co-located with the plan/fee copy
-    ('from $5.50 / month').
-
-    P1-01: the navigation-coverage suite formerly proved this surface only with an
-    OR'd fee-keyword presence check (incl. '0.275%'), so ANY dollar figure (or
-    none) stayed green. This is the VALUE oracle for the fee: it reads the actual
-    rendered amount via SettingsPage.current_monthly_fee() and asserts the precise
-    regular-tier figure.
-
-    NOTE (crawl-verified on emulator-5554): the monthly DOLLAR fee lives on the
-    Pricing-plans screen (raiz://plans: 'from $5.50 / month'); the Plans-and-fees
-    screen (raiz://fees) renders only the percentage fee ('0.275% p.a.') and the
-    plan label ('Regular'), NOT a monthly dollar figure — so the dollar-fee VALUE
-    is read from raiz://plans. Uses the long-lived `presence_funded` fixture
-    (seeded on the 'regular' plan); no fresh user per run."""
-    fx = get_or_create_fixture_user("presence_funded")
-
-    udid, host = secondary_session_target()
-    opts = get_android_options(no_reset=False, secondary=True)
-    opts.udid = udid
-    d = appium_webdriver.Remote(command_executor=host, options=opts)
-    try:
-        _login_and_home(d, fx)
-
-        from appium.webdriver.common.appiumby import AppiumBy
-        plans = _open(
-            d, DeepLinks.PLANS,
-            (AppiumBy.XPATH,
-             "//*[contains(@text,'Pricing plan') or contains(@text,'Current plan') "
-             "or contains(@text,'plan') or contains(@text,'Plan')]"),
-        )
-        # Let the fee value hydrate (it can populate after the static labels).
-        plans.wait_for_value("$5.50", timeout=DEFAULT_WAIT)
-        fee = plans.current_monthly_fee()
-        print(f"  plans-screen monthly fee rendered: {fee!r}")
-        assert fee is not None, (
-            "Pricing-plans rendered no well-formed monthly fee figure; "
-            f"texts: {plans.visible_texts()!r}"
-        )
-        for junk in _PLACEHOLDERS:
-            assert junk not in fee, f"Placeholder leakage in monthly fee: {fee!r}"
-        assert fee == "$5.50", (
-            f"current ('regular') tier monthly fee should be exactly '$5.50', "
-            f"got {fee!r}; texts: {plans.visible_texts()!r}"
-        )
-        print(f"  PASS: Pricing-plans shows exact regular-tier fee {fee!r}")
     finally:
         try:
             d.quit()

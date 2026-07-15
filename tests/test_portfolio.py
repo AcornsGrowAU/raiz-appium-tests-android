@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from appium.webdriver.common.appiumby import AppiumBy
 from pages.main_portfolio_page import MainPortfolioPage
@@ -12,6 +14,27 @@ from utils.deep_links import DeepLinks
 # re-navigation must handle the intermittent PIN re-prompt / deep-link resolve
 # flake, which the raw BasePage.go_to() does not.
 from conftest import _open_deep_link
+
+
+def _settled_snapshot(performance, timeout=STATE_PROBE_WAIT):
+    """Poll the (period-label, change-value) pair until it is non-empty AND
+    unchanged across two consecutive reads, then return it.
+
+    We wait for the widget to STABILIZE, not to DIFFER: a value that is still
+    settling from the previous range could momentarily look different and be
+    mistaken for a range actually updating, which would defeat the stuck-widget
+    detection this test relies on. Reading the pair only once it has stopped
+    changing means a genuinely stuck selector yields the same settled pair for
+    every range."""
+    deadline = time.monotonic() + timeout
+    prev = None
+    while time.monotonic() < deadline:
+        snap = (performance.get_period_label(), performance.get_change_value())
+        if any(snap) and snap == prev:
+            return snap
+        prev = snap
+        time.sleep(0.3)
+    return prev if prev is not None else ("", "")
 
 
 @pytest.mark.portfolio
@@ -260,9 +283,10 @@ class TestPerformanceRangeChangesValue:
             performance.select_time_range(rng)
             assert performance.is_visible(performance.INVESTMENT_VALUE_LABEL), \
                 f"Investment value label disappeared after selecting {rng}"
-            label = performance.get_period_label()
-            change = performance.get_change_value()
-            snapshots[rng] = (label, change)
+            # Record the pair only once the widget has SETTLED (stable across two
+            # consecutive reads), so a slow re-render isn't mistaken for a range
+            # actually changing — see _settled_snapshot.
+            snapshots[rng] = _settled_snapshot(performance)
         distinct = set(snapshots.values())
         assert len(distinct) > 1, (
             "Selecting different time ranges produced an identical period label AND "
@@ -391,6 +415,25 @@ class TestTransactionOrderingAndFilter:
 
         page = transaction_history
         label_set = set(page.FILTER_TYPE_ROW_LABELS)
+
+        # Derive the 'absent type' precondition at RUNTIME rather than trusting the
+        # hard-coded assumption that this account has zero '{FILTER_ABSENT_TYPE_NAME}'
+        # rows. Read the unfiltered list: this is a freshly-funded lump-sum account
+        # whose only row type is the positive type's row-label ('Buy'). If every
+        # visible row is within that label set, then a non-lump-sum type like
+        # 'Withdrawal' genuinely has zero rows and is a valid discriminator. If the
+        # account state has drifted to include other row types, the known-absent
+        # assumption no longer holds — skip with a reason instead of silently
+        # trusting it (which could turn the discrimination assert into a false-fail
+        # or false-pass).
+        unfiltered_types = {r["type"] for r in page.get_transactions(limit=30) if r["type"]}
+        if not unfiltered_types <= label_set:
+            pytest.skip(
+                f"Account row types {sorted(unfiltered_types)} extend beyond the "
+                f"positive-filter labels {sorted(label_set)}; "
+                f"'{page.FILTER_ABSENT_TYPE_NAME}' can no longer be assumed absent "
+                "for the discrimination check"
+            )
 
         # --- 1. POSITIVE: filter by the present type and verify a coherent result.
         applied = page.apply_transaction_type_filter(page.FILTER_TYPE_OPTION)

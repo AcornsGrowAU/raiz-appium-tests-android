@@ -115,15 +115,13 @@ class TestAddFundsModal:
         page = BasePage(driver)
         assert page.is_visible((AppiumBy.XPATH, "//*[@text='Add funds']"))
 
-    def test_lump_sum_option_in_modal(self, home, driver):
-        home.tap_add_funds()
-        page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Lump Sum Investment']"))
-
-    def test_recurring_option_in_modal(self, home, driver):
-        home.tap_add_funds()
-        page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Recurring investments']"))
+    # NOTE: the former test_lump_sum_option_in_modal / test_recurring_option_in_modal
+    # only asserted their option label was visible. That coverage is a strict subset
+    # of TestAddFundsModalNavigation.test_lump_sum_option_opens_lump_sum /
+    # test_recurring_option_opens_recurring, which click() the clickable ancestor of
+    # that same label (find_clickable raises if it is absent) and then assert the
+    # option navigates to its screen. They were removed as redundant (EFF-10); the
+    # 'Add funds' sheet title itself is still covered by test_add_funds_modal_opens.
 
     def test_modal_closes_on_back(self, home, driver):
         home.tap_add_funds()

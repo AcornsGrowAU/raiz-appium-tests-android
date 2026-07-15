@@ -96,8 +96,14 @@ class LumpSumPage(BasePage):
             self.click(self._KEY_MAP[char])
 
     def clear_amount(self):
-        for _ in range(10):
+        # Delete conditionally with a hard cap: stop as soon as the display has
+        # returned to the $0.00 zero marker instead of firing a fixed 10 deletes
+        # regardless. The cap (12, ≥ the old unconditional 10) still guarantees
+        # termination if the snapshot lags the Compose headline.
+        for _ in range(12):
             self.click(self.KEY_DELETE)
+            if self.is_present_now(self.AMOUNT_DISPLAY):
+                break
 
     def tap_preset(self, amount: str):
         presets = {"$10": self.PRESET_10, "$25": self.PRESET_25, "$50": self.PRESET_50, "$100": self.PRESET_100}

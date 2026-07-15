@@ -14,6 +14,7 @@ utils.genuser_api).
                             draw a tiny amount ($5) each, so one user serves thousands
                             of runs without re-seeding.
 """
+import functools
 import json
 import os
 import time
@@ -479,10 +480,20 @@ _LOGIN_EMAIL_OF = {
 }
 
 
+@functools.lru_cache(maxsize=None)
 def get_or_create_fixture_user(key):
     """Return the stored fixture user for `key` (reused if it still logs in), else
     seed a fresh one, store it, and return it. Returns a dict with at least
-    email/password/user_id/onboarded."""
+    email/password/user_id/onboarded.
+
+    Memoised per `key` (lru_cache) so the reuse GATE — the can_login() probe (and,
+    on a miss, the seed) — runs at most ONCE per process. Later calls for the same
+    key return the cached rec without another /v1/sessions round-trip (EFF-03).
+    The SAME dict object is handed back on every call: this is safe because no
+    caller mutates the returned rec (every consumer only reads email/password/
+    user_id/reused/onboarded). `reused` therefore reflects the FIRST resolution for
+    the life of the process (a diagnostic/log flag, not an oracle). mark_onboarded()
+    persists `onboarded` to the on-disk registry, independent of this cache."""
     if key not in FIXTURES:
         raise KeyError(f"unknown fixture '{key}'; known: {list(FIXTURES)}")
     reg = _load()

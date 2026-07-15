@@ -117,19 +117,21 @@ class TestAmountEntryEdgeCases:
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
     def test_dot_first_is_well_formed(self, lump_sum):
-        lump_sum.clear_amount()
+        # Fresh lump_sum fixture opens the keypad at $0.00 (proven by
+        # test_invest_zero_amount_reaches_confirmation's amount_is_zero precondition),
+        # and sibling tests enter directly without clearing first
+        # (test_multiple_decimal_points_are_rejected / _more_than_two_decimals_are_capped),
+        # so a leading clear_amount() is a redundant no-op here (EFF-10).
         lump_sum.enter_amount(".5")
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
     def test_leading_zeros_are_well_formed(self, lump_sum):
-        lump_sum.clear_amount()
         lump_sum.enter_amount("007")
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
     def test_large_amount_is_well_formed(self, lump_sum):
         """A 7-digit amount must render as well-formed money (comma grouping must
         not corrupt the value or break parsing)."""
-        lump_sum.clear_amount()
         lump_sum.enter_amount("1234567")
         display = lump_sum.get_amount_display()
         _assert_well_formed_amount(display)
@@ -139,7 +141,6 @@ class TestAmountEntryEdgeCases:
     def test_long_digit_run_does_not_corrupt_display(self, lump_sum):
         """Far more digits than any real investment — the display must not overflow
         into garbage or a negative."""
-        lump_sum.clear_amount()
         lump_sum.enter_amount("999999999")
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
