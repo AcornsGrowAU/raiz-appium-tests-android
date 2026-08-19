@@ -1,3 +1,5 @@
+import re
+
 from appium.webdriver.common.appiumby import AppiumBy
 from config.settings import DEFAULT_WAIT
 from pages.base_page import BasePage
@@ -104,3 +106,156 @@ class PerformancePage(BasePage):
     def get_percent_texts(self) -> list[str]:
         """All percentage tokens currently rendered on the widget."""
         return [e.text for e in self.driver.find_elements(*self.PERCENT_ANY) if e.text]
+
+    # ------------------------------------------------------------------
+    # Account carousel + per-account headline (RAIZ-10867 isolation).
+    #
+    # The Performance V2 screen renders an account carousel (LazyRow) of pill
+    # chips — Main + each Jar + each Kid — above a single headline value tile
+    # (PerformanceMainScreen.kt / PerformanceAccountsCarousel.kt). Each chip is a
+    # clickable Compose Row wrapping a TextView whose text is the account title:
+    # 'Main Portfolio', 'Jar: <name>', 'Kid: <name>' (PerformanceAccountUi.title +
+    # features/performancev2 strings.xml performance_v2_account_chip_*). Selecting a
+    # chip swaps the headline title AND balance to that account (VM.onAccountSelected
+    # -> _balanceState = Content(account.balance), where balance is the account's OWN
+    # currentBalance / accumulatedAmount). RAIZ-10867 was a graph-cache bleed across
+    # accounts; the invariant this exposes is that the value shown for the selected
+    # account is THAT account's own figure, never a previously-viewed account's.
+    # ------------------------------------------------------------------
+
+    # Per-account header label — distinguishes the account TYPE (not which specific
+    # jar/kid; the VALUE does that). resolveHeaderTitle() in PerformanceMainViewModel.
+    HEADER_MAIN = (AppiumBy.XPATH, "//*[@text='Main Portfolio investment value']")
+    HEADER_JAR = (AppiumBy.XPATH, "//*[@text='Jars Account investment value']")
+    HEADER_KID = (AppiumBy.XPATH, "//*[@text='Kids Account investment value']")
+
+    # Any account chip in the carousel (used to wait for the carousel to populate —
+    # accounts load async, so the screen shows a shimmer before the chips appear).
+    ANY_ACCOUNT_CHIP = (AppiumBy.XPATH,
+        "//android.view.View[@clickable='true']"
+        "[.//android.widget.TextView[@text='Main Portfolio' "
+        "or starts-with(@text,'Jar:') or starts-with(@text,'Kid:')]]")
+
+    _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+    @staticmethod
+    def jar_chip_title(name: str) -> str:
+        """The carousel chip label for a jar named `name` ('Jar: <name>').
+
+        NOTE: PerformanceAccountUi.formatAccountChipLabel truncates names past ~20
+        chars (MAX_DISPLAY_NAME_LENGTH 25 minus the 'Jar: ' prefix) with an ellipsis.
+        The reusable fixture jar names are short, so no truncation applies here; a
+        longer name would need the truncated form."""
+        return f"Jar: {name}"
+
+    @staticmethod
+    def kid_chip_title(name: str) -> str:
+        """The carousel chip label for a kid named `name` ('Kid: <name>')."""
+        return f"Kid: {name}"
+
+    def account_chip(self, title: str):
+        return (AppiumBy.XPATH,
+                f"//android.view.View[@clickable='true']"
+                f"[.//android.widget.TextView[@text=\"{title}\"]]")
+
+    def has_account_carousel(self, timeout=DEFAULT_WAIT) -> bool:
+        """True once the account carousel has populated (at least one chip)."""
+        return self.is_present(self.ANY_ACCOUNT_CHIP, timeout=timeout)
+
+    def current_header_type(self):
+        """'main' | 'jar' | 'kid' for the account TYPE currently shown, else None."""
+        if self.is_present_now(self.HEADER_JAR):
+            return "jar"
+        if self.is_present_now(self.HEADER_KID):
+            return "kid"
+        if self.is_present_now(self.HEADER_MAIN):
+            return "main"
+        return None
+
+    def _swipe_carousel(self, to_left: bool = True):
+        """Best-effort horizontal nudge of the account carousel to reveal a chip
+        scrolled off-screen. The carousel sits just under the 'Performance' action
+        bar. TODO(device): the y-fraction (0.22 of screen height) is a best-guess
+        from the layout (action bar -> carousel top=16dp) and not yet confirmed on a
+        device; with the 3-chip reusable fixture all chips fit and this rarely fires,
+        but verify/tune the band if a longer carousel needs scrolling."""
+        try:
+            size = self.driver.get_window_size()
+            y = int(size["height"] * 0.22)
+            if to_left:
+                x1, x2 = int(size["width"] * 0.8), int(size["width"] * 0.2)
+            else:
+                x1, x2 = int(size["width"] * 0.2), int(size["width"] * 0.8)
+            self.driver.swipe(x1, y, x2, y, 400)
+        except Exception:
+            pass
+
+    def select_account_chip(self, title: str, attempts: int = 4) -> bool:
+        """Tap the carousel chip whose title is exactly `title`. Returns True if it
+        was found and tapped. Uses a presence-based click (Compose pills near the
+        viewport edge are in the tree but may not report as 'visible'), nudging the
+        carousel horizontally between tries for a chip that starts off-screen."""
+        loc = self.account_chip(title)
+        for i in range(attempts):
+            if self.is_present_now(loc):
+                self.click_present(loc)
+                return True
+            # Alternate scroll directions so we find a chip on either side.
+            self._swipe_carousel(to_left=(i % 2 == 0))
+        if self.is_present_now(loc):
+            self.click_present(loc)
+            return True
+        return False
+
+    def _y_center(self, el):
+        m = self._BOUNDS_RE.match(el.get_attribute("bounds") or "")
+        if not m:
+            return None
+        return (int(m.group(2)) + int(m.group(4))) / 2
+
+    def _header_label_el(self):
+        for loc in (self.HEADER_MAIN, self.HEADER_JAR, self.HEADER_KID):
+            els = self.driver.find_elements(*loc)
+            if els:
+                return els[0]
+        return None
+
+    def read_headline_amount(self) -> str:
+        """The per-account headline balance text (e.g. '$4,000.00'), '' if absent.
+
+        Anchors to the account header label and returns the nearest money TextView —
+        the same geometric label->value pairing MainPortfolioPage uses. This matters
+        on this screen because the allocations pager page is pre-composed
+        (beyondViewportPageCount=2), so a bare 'clickable $ TextView' read could latch
+        onto an off-screen allocation row instead of the headline. Falls back to the
+        clickable headline $ (PerformanceMainHeader's balance Text is clickable)."""
+        from utils.assertions import is_money
+        money = self.driver.find_elements(
+            AppiumBy.XPATH, "//android.widget.TextView[contains(@text,'$')]")
+        label = self._header_label_el()
+        if label is not None:
+            ly = self._y_center(label)
+            if ly is not None:
+                best, best_d = "", None
+                for e in money:
+                    try:
+                        t = e.text
+                        if not is_money(t):
+                            continue
+                        y = self._y_center(e)
+                    except Exception:
+                        continue
+                    if y is None:
+                        continue
+                    d = abs(y - ly)
+                    if best_d is None or d < best_d:
+                        best, best_d = t, d
+                if best:
+                    return best
+        for e in self.driver.find_elements(*self.INVESTMENT_VALUE_AMOUNT):
+            try:
+                if e.text and is_money(e.text):
+                    return e.text
+            except Exception:
+                continue
+        return ""

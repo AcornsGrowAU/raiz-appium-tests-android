@@ -87,3 +87,86 @@ class SuperPage(BasePage):
 
     def get_document_texts(self) -> list[str]:
         return [el.text for el in self.driver.find_elements(*self.DOC_TEXTS) if el.text]
+
+    # --- Super History summary (SuperHistoryScreen) ------------------------- #
+    # On a FUNDED/activated super, raiz://raiz_super lands on the Super Home
+    # dashboard, which carries a "History" card whose "History Details" button
+    # (raiz_super_history_details) opens SuperHistoryScreen. That screen shows a
+    # summary block (SuperHistorySummary) of clickable rows: Employer
+    # Contributions, Your Contributions, Reinvested Dividends, the returns row,
+    # and Rollover — each opening an info dialog when tapped.
+    #
+    # RAIZ-10889 (release 2.41.2): the returns row + its info dialog title are
+    # renamed "Market Returns" -> "Total Returns" (the underlying value,
+    # gains.total.netReturnAmount, is unchanged). Grounded in app source:
+    #   raizFeatureSuper/.../history/summary/SuperHistorySummary.kt (the row)
+    #   raizFeatureSuper/.../history/SuperHistoryViewModel.kt#onMarketClick (dialog)
+    #   raizFeatureSuper/src/main/res/values/strings.xml
+    #     raiz_super_history_market_returns / card_dialog_title_market_returns
+    HISTORY_DETAILS_BUTTON = (AppiumBy.XPATH,
+        "//*[@clickable='true'][.//android.widget.TextView[@text='History Details']]")
+    HISTORY_DETAILS_TEXT = (AppiumBy.XPATH, "//android.widget.TextView[@text='History Details']")
+
+    # Stable, UNCHANGED sibling rows of the summary. These anchor "the History
+    # summary surface is on screen" independently of the returns-row rename, so
+    # the label assertion can only pass when the surface is actually present
+    # (never vacuously) and fails if the row still says "Market Returns".
+    HISTORY_SUMMARY_ANCHOR = (AppiumBy.XPATH,
+        "//android.widget.TextView[@text='Employer Contributions' "
+        "or @text='Reinvested Dividends' or @text='Rollover']")
+
+    # RAIZ-10889 — the renamed row label and its retired predecessor. Exact-text
+    # match so it never collides with the main portfolio's "Total returns:" /
+    # "Market return to date:" (different strings, trailing colon).
+    TOTAL_RETURNS_LABEL = (AppiumBy.XPATH, "//android.widget.TextView[@text='Total Returns']")
+    MARKET_RETURNS_LABEL = (AppiumBy.XPATH, "//android.widget.TextView[@text='Market Returns']")
+    # The whole row is clickable (onMarketClick) and opens the info dialog.
+    TOTAL_RETURNS_ROW = (AppiumBy.XPATH,
+        "//*[@clickable='true'][.//android.widget.TextView[@text='Total Returns']]")
+
+    # Info dialog opened by tapping the returns row. Its title is renamed to
+    # "Total Returns"; the help body keeps the distinctive "Total gain/loss…"
+    # copy (card_dialog_message_market_returns) that proves the dialog opened.
+    # TODO(device): confirm the dialog container id/structure on 2.41.2 — the
+    # title node may need scoping to the dialog if the row label leaks into the
+    # match; the message substring below is the device-independent open-proof.
+    RETURNS_DIALOG_MESSAGE = (AppiumBy.XPATH,
+        "//*[contains(@text,'Total gain/loss shows how your investments')]")
+
+    def open_history_summary(self, timeout=DEFAULT_WAIT) -> bool:
+        """Best-effort: from the current Super surface, reach the History summary
+        (SuperHistoryScreen) that carries the returns row.
+
+        On a funded super this taps the Super Home "History Details" button; on
+        the shared UNFUNDED test account raiz://raiz_super lands on onboarding and
+        neither the button nor the summary exists. Returns True once a stable
+        summary anchor row is on screen, False otherwise (caller should skip).
+        """
+        if self.is_present_now(self.HISTORY_SUMMARY_ANCHOR):
+            return True
+        if not self.is_present_now(self.HISTORY_DETAILS_TEXT):
+            # The History card can sit below the fold on the Super Home dashboard.
+            try:
+                self.scroll_to_text("History Details")
+            except Exception:
+                pass
+        if self.is_present(self.HISTORY_DETAILS_TEXT, timeout=timeout):
+            try:
+                self.click(self.HISTORY_DETAILS_BUTTON)
+            except Exception:
+                self.click_present(self.HISTORY_DETAILS_TEXT)
+            return self.is_present(self.HISTORY_SUMMARY_ANCHOR, timeout=timeout)
+        return False
+
+    def open_returns_info_dialog(self, timeout=DEFAULT_WAIT) -> bool:
+        """Tap the (renamed) returns row to open its info dialog. The whole row is
+        clickable — not just the info icon — so tapping the row opens the dialog.
+        Returns True once the dialog's distinctive help copy renders. Best-effort:
+        False if the row/dialog can't be resolved (e.g. layout differs on-device)."""
+        row = self.TOTAL_RETURNS_ROW if self.is_present_now(self.TOTAL_RETURNS_ROW) \
+            else self.TOTAL_RETURNS_LABEL
+        try:
+            self.click_present(row)
+        except Exception:
+            return False
+        return self.is_present(self.RETURNS_DIALOG_MESSAGE, timeout=timeout)
