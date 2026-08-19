@@ -2,8 +2,6 @@
 Investment flow tests — Lump Sum, Withdraw, Recurring Investments.
 These tests verify the UI and keypad behaviour WITHOUT submitting real transactions.
 """
-import time
-
 import pytest
 from appium.webdriver.common.appiumby import AppiumBy
 from pages.lump_sum_page import LumpSumPage
@@ -117,29 +115,36 @@ class TestAddFundsModal:
         page = BasePage(driver)
         assert page.is_visible((AppiumBy.XPATH, "//*[@text='Add funds']"))
 
-    def test_lump_sum_option_in_modal(self, home, driver):
-        home.tap_add_funds()
-        page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Lump Sum Investment']"))
-
-    def test_recurring_option_in_modal(self, home, driver):
-        home.tap_add_funds()
-        page = BasePage(driver)
-        assert page.is_visible((AppiumBy.XPATH, "//*[@text='Recurring investments']"))
+    # NOTE: the former test_lump_sum_option_in_modal / test_recurring_option_in_modal
+    # only asserted their option label was visible. That coverage is a strict subset
+    # of TestAddFundsModalNavigation.test_lump_sum_option_opens_lump_sum /
+    # test_recurring_option_opens_recurring, which click() the clickable ancestor of
+    # that same label (find_clickable raises if it is absent) and then assert the
+    # option navigates to its screen. They were removed as redundant (EFF-10); the
+    # 'Add funds' sheet title itself is still covered by test_add_funds_modal_opens.
 
     def test_modal_closes_on_back(self, home, driver):
         home.tap_add_funds()
         page = BasePage(driver)
         # The Add-funds sheet is a Compose ModalBottomSheet. Its dismissal is
         # driven by sheetState/BackHandler, which only becomes active once the
-        # enter-animation has settled. If driver.back() fires mid-animation it
-        # falls through to the activity's default back-press and EXITS the app
-        # instead of closing the sheet. Wait for the sheet's title (real string:
-        # quick_actions_dialog_title = "Add funds") to be visible, then add a
-        # short settle so the back handler is registered before we go back.
+        # enter-animation has settled and the sheet body has composed. If
+        # driver.back() fires mid-animation it falls through to the activity's
+        # default back-press and EXITS the app instead of closing the sheet.
+        # Instead of a blind fixed settle, wait for a BackHandler-ready signal — the
+        # sheet's interactive content laid out inside the settled sheet (an option
+        # row is only present once the ModalBottomSheet content, and with it the
+        # BackHandler composable, has composed). Only then go back.
+        #
+        # We deliberately do NOT reactivate-and-recover the app after back(): an
+        # early back() that exits the app must still be able to surface here as a
+        # failure (home.is_loaded() goes False), never be masked.
         assert page.is_visible((AppiumBy.XPATH, "//*[@text='Add funds']")), \
             "Add funds sheet did not appear after tapping Add funds"
-        time.sleep(0.4)
+        assert page.is_visible((AppiumBy.XPATH,
+                "//android.view.View[@clickable='true']"
+                "[.//android.widget.TextView[@text='Lump Sum Investment']]")), \
+            "Add funds sheet content did not compose (BackHandler not ready) before back()"
         driver.back()
         assert home.is_loaded(), \
             "Back press should close the Add funds sheet and return to Home"

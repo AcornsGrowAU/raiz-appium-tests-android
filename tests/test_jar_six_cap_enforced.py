@@ -124,14 +124,41 @@ VALID_ICON_ID = "home"
 # Compare exactly (no settle drift on a zero-balance jar).
 
 
-def _fetch_jars(parent_email, pwd):
-    """Log in AS the parent and read its jars list (GET /jars/v1/users). Returns the
-    list of jar dicts (each carries name + accumulated_amount from jars/show.rabl),
-    or None if login / read fails."""
-    op, tok = mint(parent_email, pwd)
-    if not tok:
-        return None
-    status, body = call(op, "GET", "/jars/v1/users", token=tok)
+class _ParentSession:
+    """EFF-02: reuse ONE minted parent /v1/sessions token across every jars call in
+    this test (cap read, list reads, top-up creates, over-cap attempt, cleanup
+    closes). Re-mounting a token per call is the largest avoidable pressure on the
+    rate-limited sessions endpoint. Re-mints only when a cached token is rejected
+    (401), mirroring the _BalanceReader pattern in the withdrawal value tests.
+    `.call()` returns (None, None) on a login failure so callers keep their existing
+    'None -> failure' handling. Also reused by the kid-eight-cap test (imported)."""
+
+    def __init__(self, email, pwd=SEEDED_PWD):
+        self.email, self.pwd = email, pwd
+        self._op = self._tok = None
+
+    def _ensure(self):
+        if self._tok is None:
+            self._op, self._tok = mint(self.email, self.pwd)
+        return self._tok is not None
+
+    def call(self, method, path, body=None):
+        for _ in range(2):  # one retry: re-mint if the cached token was rejected
+            if not self._ensure():
+                self._op = self._tok = None
+                return None, None
+            status, resp = call(self._op, method, path, token=self._tok, body=body)
+            if status != 401:
+                return status, resp
+            self._op = self._tok = None  # token expired/invalid -> re-mint next pass
+        return None, None
+
+
+def _fetch_jars(sess):
+    """Read the parent's jars list (GET /jars/v1/users) over the shared session.
+    Returns the list of jar dicts (each carries name + accumulated_amount from
+    jars/show.rabl), or None if login / read fails."""
+    status, body = sess.call("GET", "/jars/v1/users")
     if status != 200:
         return None
     # list.rabl is `child @jar_users => :jar_users` -> {"jar_users": [...]}.
@@ -142,15 +169,12 @@ def _fetch_jars(parent_email, pwd):
     return None
 
 
-def _read_live_cap(parent_email, pwd):
+def _read_live_cap(sess):
     """GET /jars/v1/settings -> the live Setting.jars_limit_number (limit.value).
     Returns the int cap, or None if unreadable (caller falls back to EXPECTED_CAP).
     Reading the cap from the backend keeps the oracle honest if the configured limit
     ever differs from the source default of 6, instead of hard-coding it."""
-    op, tok = mint(parent_email, pwd)
-    if not tok:
-        return None
-    status, body = call(op, "GET", "/jars/v1/settings", token=tok)
+    status, body = sess.call("GET", "/jars/v1/settings")
     if status != 200 or not isinstance(body, dict):
         return None
     limit = body.get("limit")
@@ -169,28 +193,21 @@ def _active_jars(jars):
     return [j for j in jars if isinstance(j, dict) and not j.get("closed", False)]
 
 
-def _close_jar(parent_email, pwd, jar_user_id):
+def _close_jar(sess, jar_user_id):
     """Best-effort cleanup: close (DELETE /jars/v1/users with jar_user_id) a jar that
     an over-cap create unexpectedly produced, so the fixture is restored to the cap
     and stays re-runnable. Returns (status, body) or (None, None) on login failure."""
     if not jar_user_id:
         return None, None
-    op, tok = mint(parent_email, pwd)
-    if not tok:
-        return None, None
-    return call(op, "DELETE", "/jars/v1/users", token=tok,
-                body={"jar_user_id": jar_user_id})
+    return sess.call("DELETE", "/jars/v1/users", body={"jar_user_id": jar_user_id})
 
 
-def _create_bare_jar(parent_email, pwd, name):
+def _create_bare_jar(sess, name):
     """Create a single bare jar (POST /jars/v1/users {name, icon_id}) AS the parent.
     Returns (status, body). Used to top the parent up from the seeded count to the
     live cap so the (cap+1)th attempt actually exercises validate_limit_number."""
-    op, tok = mint(parent_email, pwd)
-    if not tok:
-        return None, None
-    return call(op, "POST", "/jars/v1/users", token=tok,
-                body={"name": name, "icon_id": VALID_ICON_ID})
+    return sess.call("POST", "/jars/v1/users",
+                     body={"name": name, "icon_id": VALID_ICON_ID})
 
 
 def _names(jars):
@@ -207,16 +224,17 @@ def _balances_by_name(jars):
     return out
 
 
-def attempt_create_subaccount_blocked(parent_email, pwd, create_path, payload):
-    """SHARED cap helper (kid-eight-cap reuses this): log in AS the parent and POST a
-    sub-account create that should be REJECTED by a cap. Returns (status, body). The
-    caller asserts NOT-completable (status not in 200/201) — we do NOT match a
+def attempt_create_subaccount_blocked(sess, create_path, payload):
+    """SHARED cap helper (kid-eight-cap reuses this): over the parent's shared session,
+    POST a sub-account create that should be REJECTED by a cap. Returns (status, body).
+    The caller asserts NOT-completable (status not in 200/201) — we do NOT match a
     specific alert string, only that the create did not complete.
 
     Raises AssertionError on login failure so a bad token never masks a missed cap."""
-    op, tok = mint(parent_email, pwd)
-    assert tok, f"could not log in as parent {parent_email} to attempt the over-cap create"
-    return call(op, "POST", create_path, token=tok, body=payload)
+    status, body = sess.call("POST", create_path, body=payload)
+    assert status is not None, (
+        f"could not log in as parent {sess.email} to attempt the over-cap create")
+    return status, body
 
 
 def test_over_cap_jar_blocked_and_existing_unchanged():
@@ -227,11 +245,14 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
     Asserts STATE + the rejection outcome, never a UI affordance/alert string."""
     parent = get_or_create_fixture_user(FIXTURE_KEY)
     parent_email, pwd = parent["email"], parent.get("password", SEEDED_PWD)
+    # EFF-02: one minted parent session threaded through every call below (cap read,
+    # list reads, top-up creates, over-cap attempt, cleanup closes).
+    sess = _ParentSession(parent_email, pwd)
 
     # Cap value: prefer the LIVE backend setting over the hard-coded source default.
     # The DEV backend's Setting.jars_limit_number is 10 (source default is 6); reading
     # it live keeps the oracle honest instead of mis-failing a 7th create as a defect.
-    live_cap = _read_live_cap(parent_email, pwd)
+    live_cap = _read_live_cap(sess)
     cap = live_cap if live_cap is not None else FALLBACK_CAP
     if live_cap is None:
         print(f"  WARN: could not read live cap (GET /jars/v1/settings); falling back "
@@ -246,7 +267,7 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
         # --- TOP-UP: bring the parent up to EXACTLY the cap with bare jars. ---
         # The fixture seeds SEEDED_JAR_COUNT (6); the live cap is higher, so create
         # the remaining bare jars so the (cap+1)th attempt actually trips the guard.
-        seeded_raw = _fetch_jars(parent_email, pwd)
+        seeded_raw = _fetch_jars(sess)
         assert seeded_raw is not None, (
             f"could not read jars list for parent {parent_email} (login or "
             f"GET /jars/v1/users failed) — cannot establish the baseline"
@@ -265,7 +286,7 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
               f"to reach the cap of {cap}")
         for i in range(need):
             name = f"{TOPUP_NAME_PREFIX} {int(time.time())}_{i}"
-            tstatus, tbody = _create_bare_jar(parent_email, pwd, name)
+            tstatus, tbody = _create_bare_jar(sess, name)
             assert tstatus in (200, 201), (
                 f"failed to create top-up jar {name} (HTTP {tstatus} {str(tbody)[:160]}) "
                 f"— cannot reach the cap to test the (cap+1)th rejection"
@@ -274,7 +295,7 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
                 created_ids.append(tbody["id"])
 
         # --- PRE: the parent now sits at EXACTLY the cap. ---
-        before_raw = _fetch_jars(parent_email, pwd)
+        before_raw = _fetch_jars(sess)
         assert before_raw is not None, "could not re-read jars after top-up"
         before = _active_jars(before_raw)
         assert len(before) == cap, (
@@ -288,7 +309,7 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
         # --- ACT: attempt to create a (cap+1)th jar with an otherwise-valid payload. ---
         over = {"name": f"QA Over Cap Jar {int(time.time())}", "icon_id": VALID_ICON_ID}
         status, body = attempt_create_subaccount_blocked(
-            parent_email, pwd, "/jars/v1/users", over)
+            sess, "/jars/v1/users", over)
         print(f"  ACT: over-cap jar create -> HTTP {status} {str(body)[:200]}")
 
         # If the create UNEXPECTEDLY succeeded, capture its id so the `finally` closes
@@ -313,7 +334,7 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
         )
 
         # --- ASSERT (2): the existing jars are EXACTLY unchanged. ---
-        after_raw = _fetch_jars(parent_email, pwd)
+        after_raw = _fetch_jars(sess)
         assert after_raw is not None, (
             f"could not re-read jars list for parent {parent_email} after the rejected "
             f"over-cap create — cannot confirm the existing jars were left unchanged"
@@ -340,5 +361,5 @@ def test_over_cap_jar_blocked_and_existing_unchanged():
         # jar that slipped through) so the fixture is restored to its seeded 6 and the
         # next run's baseline holds. (A prior version left jars behind, breaking re-runs.)
         for jid in created_ids:
-            cstatus, cbody = _close_jar(parent_email, pwd, jid)
+            cstatus, cbody = _close_jar(sess, jid)
             print(f"  CLEANUP: closed jar id={jid} -> HTTP {cstatus} {str(cbody)[:80]}")

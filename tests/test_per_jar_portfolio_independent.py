@@ -56,11 +56,13 @@ DATA (manifest `jar_portfolio_distinct`): one parent (`user_1`, a `regular` user
 Run (no emulator):
   venv/bin/python -m pytest tests/test_per_jar_portfolio_independent.py -v -s -o addopts=""
 """
+import time
+
 import pytest
 
 from utils.genuser_api import SEEDED_PWD, call, mint
 from utils.genuser_fixtures import (
-    STYLE_AGGRESSIVE, STYLE_CONSERVATIVE,
+    JAR_PF_NAME, STYLE_AGGRESSIVE, STYLE_CONSERVATIVE,
     get_or_create_fixture_user,
 )
 
@@ -68,47 +70,132 @@ pytestmark = [pytest.mark.value_api, pytest.mark.jars, pytest.mark.portfolio]
 
 FIXTURE_KEY = "jar_portfolio_distinct"
 
+# A TRANSIENT read failure (no token from a rate-limited /v1/sessions, a 5xx, or a
+# network blip) is retried a bounded number of times before we fall through to SKIP, so a
+# rate-limit blip no longer silently NO-RUNS the label/independence oracle. A genuine GATE
+# (a real non-2xx contract response / a missing allocation_profile_id / a missing jar or
+# jar-portfolio object) skips immediately. Mirrors
+# test_networth_total_investments_recon._get_v3_user.
+_READ_ATTEMPTS = 3
+_READ_RETRY_DELAY_S = 8
 
-def _jar_email(parent_email):
-    """The fixture seeds the jar at `jp.<parent-email>`
-    (utils.genuser_fixtures FIXTURES['jar_portfolio_distinct']:
-     jar_user('jp.'+email, ..., portfolio_name=STYLE_CONSERVATIVE)). Derive from the
-    stored parent record so it stays correct if the fixture is ever re-seeded under a
-    new timestamped address."""
-    return "jp." + parent_email
+
+def _with_retry(once, label):
+    """Run a single-attempt reader (`once` -> dict | ('GATE'|'TRANSIENT', reason)) under a
+    BOUNDED retry: return the dict on success, skip immediately on a genuine GATE, and
+    retry the TRANSIENT (re-minting a fresh token inside `once`) before falling through to
+    SKIP. Preserves the 'dict | SKIP:-string' contract the callers already expect."""
+    last = None
+    for i in range(_READ_ATTEMPTS):
+        r = once()
+        if isinstance(r, dict):
+            return r
+        kind, reason = r
+        if kind == "GATE":
+            return "SKIP: " + reason
+        last = reason
+        print(f"  [{label} attempt {i + 1}/{_READ_ATTEMPTS}] transient: {reason}")
+        if i < _READ_ATTEMPTS - 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+    return f"SKIP: {last} (persisted across {_READ_ATTEMPTS} bounded retries)"
 
 
-def _read_own_portfolio(email, who):
-    """Resolve an entity's OWN portfolio off the PUBLIC DEV API (log in AS the entity).
+def _read_jar_portfolio_via_parent_once(parent_email):
+    """ONE attempt to resolve the JAR's portfolio through the PARENT's session.
 
-    Returns {label, uuid} where:
-      - uuid  = the entity's own allocation_profile_id (the portfolio it is wired to),
-      - label = that portfolio's published `name` (the persisted style),
-    or a string starting with 'SKIP:' describing the gate that blocked the read.
+    Jars are sub-accounts with NO loginable identity (their email 401s on /v1/sessions by
+    design), so the jar leg cannot log in as the jar. The parent's jars list
+    (GET /jars/v1/users) exposes each jar's portfolio directly as a nested object
+    {id: <portfolio uuid>, name: <label>} — the same uuid+label pair the old own-token
+    read produced. (Inlined here rather than via genuser_api.jar_by_name so a login/read
+    blip can be classed TRANSIENT vs a real missing-jar GATE, which the helper's flat None
+    return conflates.)
+
+    Returns dict {label, uuid} | ('GATE', reason) | ('TRANSIENT', reason)."""
+    op, tok = mint(parent_email, SEEDED_PWD)
+    if not tok:
+        return ("TRANSIENT", f"could not log in as parent {parent_email} (auth/rate-limit)")
+
+    try:
+        s, b = call(op, "GET", "/jars/v1/users", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /jars/v1/users for {parent_email}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /jars/v1/users for {parent_email} returned HTTP {s} (server error)")
+    if s != 200 or not isinstance(b, dict):
+        return ("GATE", f"GET /jars/v1/users for {parent_email} returned HTTP {s} "
+                "(parent jars-list gate)")
+    jar = None
+    for j in b.get("jar_users", []) or []:
+        if j.get("name") == JAR_PF_NAME:
+            jar = j
+            break
+    if jar is None:
+        return ("GATE", f"no jar named {JAR_PF_NAME!r} under {parent_email} "
+                "(seed gate, not a product result)")
+    portfolio = jar.get("portfolio") or {}
+    uuid, label = portfolio.get("id"), portfolio.get("name")
+    if not uuid or not label:
+        return ("GATE", f"jar {JAR_PF_NAME!r} carries no portfolio object "
+                f"(portfolio={portfolio!r}) — seed gate, not a product result")
+    return {"label": label, "uuid": uuid}
+
+
+def _read_own_portfolio_once(email, who):
+    """ONE attempt to resolve an entity's OWN portfolio off the PUBLIC DEV API (log in AS
+    the entity).
+
+    Returns dict {label, uuid} | ('GATE', reason) | ('TRANSIENT', reason).
     No balance is touched."""
     op, tok = mint(email, SEEDED_PWD)
     if not tok:
-        return f"SKIP: could not log in as {who} {email} (auth/rate-limit gate)"
+        return ("TRANSIENT", f"could not log in as {who} {email} (auth/rate-limit)")
 
-    s, b = call(op, "GET", "/v1/user", token=tok)
+    try:
+        s, b = call(op, "GET", "/v1/user", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /v1/user for {who} {email}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /v1/user for {who} {email} returned HTTP {s} (server error)")
     if s != 200 or not isinstance(b, dict):
-        return f"SKIP: GET /v1/user for {who} {email} returned HTTP {s} (read gate)"
+        return ("GATE", f"GET /v1/user for {who} {email} returned HTTP {s} (read gate)")
     user = b.get("user", b)
     uuid = user.get("allocation_profile_id")
     if not uuid:
-        return (f"SKIP: {who} {email} has no allocation_profile_id (no portfolio "
+        return ("GATE", f"{who} {email} has no allocation_profile_id (no portfolio "
                 "wired to the entity) — seed gate, not a product result")
 
-    s, b = call(op, "GET", f"/v1/portfolios/{uuid}", token=tok)
+    try:
+        s, b = call(op, "GET", f"/v1/portfolios/{uuid}", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /v1/portfolios/{uuid} for {who} {email}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /v1/portfolios/{uuid} for {who} {email} returned HTTP {s} "
+                "(server error)")
     if s != 200 or not isinstance(b, dict):
-        return (f"SKIP: GET /v1/portfolios/{uuid} for {who} {email} returned HTTP {s} "
+        return ("GATE", f"GET /v1/portfolios/{uuid} for {who} {email} returned HTTP {s} "
                 "(portfolio detail read gate)")
     portfolio = b.get("portfolio", b)
     label = portfolio.get("name")
     if not label:
-        return (f"SKIP: portfolio detail for {who} {email} missing name "
+        return ("GATE", f"portfolio detail for {who} {email} missing name "
                 f"(name={label!r}) — read gate")
     return {"label": label, "uuid": uuid}
+
+
+def _read_jar_portfolio_via_parent(parent_email):
+    """Resolve the JAR's portfolio through the PARENT's session, with a bounded transient
+    retry (see _with_retry). Returns {label, uuid} or a 'SKIP:'-prefixed gate description."""
+    return _with_retry(lambda: _read_jar_portfolio_via_parent_once(parent_email),
+                       f"read_jar {JAR_PF_NAME!r}")
+
+
+def _read_own_portfolio(email, who):
+    """Resolve an entity's OWN portfolio off the PUBLIC DEV API, with a bounded transient
+    retry (see _with_retry). Returns {label, uuid} (uuid = the entity's own
+    allocation_profile_id; label = that portfolio's published name), or a 'SKIP:'-prefixed
+    gate description. No balance is touched."""
+    return _with_retry(lambda: _read_own_portfolio_once(email, who), f"read_{who} {email}")
 
 
 def test_per_jar_portfolio_stored_independently():
@@ -121,12 +208,11 @@ def test_per_jar_portfolio_stored_independently():
     deferred per the backlog scope and is NOT covered here."""
     parent = get_or_create_fixture_user(FIXTURE_KEY)
     parent_email = parent["email"]
-    jar_email = _jar_email(parent_email)
     print(f"  fixture parent/Main {parent_email} (reused={parent.get('reused')}; "
           f"expect {STYLE_AGGRESSIVE!r}); "
-          f"jar {jar_email} (expect {STYLE_CONSERVATIVE!r})")
+          f"jar {JAR_PF_NAME!r} read via parent session (expect {STYLE_CONSERVATIVE!r})")
 
-    jar = _read_own_portfolio(jar_email, "jar")
+    jar = _read_jar_portfolio_via_parent(parent_email)
     if isinstance(jar, str) and jar.startswith("SKIP:"):
         pytest.skip("skip-with-reason: " + jar[len("SKIP:"):].strip())
     main = _read_own_portfolio(parent_email, "Main")

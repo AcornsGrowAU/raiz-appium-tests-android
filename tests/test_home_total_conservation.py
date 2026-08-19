@@ -23,9 +23,11 @@ WHAT THE HOME HEADLINE ACTUALLY BINDS TO (grounded in app source, build 3252):
 
 THEREFORE the value invariant behind the Home headline is fully provable at the API
 layer, deterministically and with no device:
-  (A) read each sub-account's settled current_balance independently (Main via the
-      parent login, jar via the jar login, kid via the kid login — each is its own
-      User with its own current_balance), and
+  (A) read each account's settled balance independently (Main via the parent
+      login, kid via the kid login — each its own User with its own
+      current_balance — and the jar via the PARENT session's jars API
+      (`accumulated_amount` == the jar's own balance): jars are sub-accounts with
+      NO loginable identity, a jar-email /v1/sessions 401s by design), and
   (B) read the parent's backend AGGREGATE investing_accounts_balance from GET /v3/user
       — the SAME field the Home headline renders — as an INDEPENDENT oracle, and assert
         investing_accounts_balance  ==  Main + jar + kid     (to the cent, within band)
@@ -62,7 +64,7 @@ import pytest
 
 from utils.genuser_api import (
     SEEDED_PWD, ach_credits, call, current_balance, funded_user, gen_create,
-    jar_user, kid_user, mint,
+    jar_balance_by_name, jar_user, kid_user, mint,
 )
 from utils.genuser_fixtures import (
     CONSERVE_JAR_BALANCE, CONSERVE_KID_BALANCE, CONSERVE_MAIN_BALANCE,
@@ -88,21 +90,28 @@ SUM_BAND = 3 * BAND  # 4.50  (< the smallest leg, $40, so a lost leg cannot hide
 SETTLE_BUDGET_S = int(os.getenv("SETTLE_BUDGET_S", "420"))
 POLL_INTERVAL_S = int(os.getenv("POLL_INTERVAL_S", "20"))
 
+# The seeded jar card's name — jars have NO loginable identity (a jar-email login
+# 401s by design), so the jar leg is read by THIS name via the parent session.
+JAR_NAME = "QA HomeTotal Jar"
+
 
 def _ts():
     return str(int(time.time()))
 
 
-def _poll_balance(email, target, budget_s):
-    """Poll a User's current_balance until it lands within BAND of `target` (or the
-    budget runs out). Returns (best_seen_toward_target, settled_bool)."""
+def _poll_balance(read, label, target, budget_s):
+    """Poll a balance reader until it lands within BAND of `target` (or the budget
+    runs out). `read` is a zero-arg callable returning float|None — Main/kid read
+    their own current_balance via their own login; the jar (no loginable identity)
+    reads its accumulated_amount via the parent session (jar_balance_by_name).
+    Returns (best_seen_toward_target, settled_bool)."""
     waited, best = 0, None
     while waited <= budget_s:
-        bal = current_balance(email, SEEDED_PWD)
+        bal = read()
         if bal is not None:
             best = bal if best is None else (
                 bal if abs(bal - target) < abs(best - target) else best)
-            print(f"  [poll {email.split('@')[0]} +{waited}s] current_balance={bal} "
+            print(f"  [poll {label} +{waited}s] balance={bal} "
                   f"(target ${target})")
             if abs(bal - target) <= BAND:
                 return bal, True
@@ -168,7 +177,7 @@ def test_home_total_reconciles_to_jar_and_kid_cards_and_backend_aggregate():
     payload = {
         "user_1": funded_user(main_email, f"HomeTotalMain{ts}"),
         **ach_credits("@user_1", MAIN_SEED, prefix="mainbase"),
-        "jar_1": jar_user(jar_email, f"HomeTotalJar{ts}", "@user_1", "QA HomeTotal Jar"),
+        "jar_1": jar_user(jar_email, f"HomeTotalJar{ts}", "@user_1", JAR_NAME),
         **ach_credits("@jar_1", JAR_SEED, prefix="jarbase"),
         "kid_1": kid_user(kid_email, f"HomeTotalKid{ts}", "@user_1"),
         **ach_credits("@kid_1", KID_SEED, prefix="kidbase"),
@@ -186,15 +195,21 @@ def test_home_total_reconciles_to_jar_and_kid_cards_and_backend_aggregate():
           f"Jar {created['jar_1']['id']} (${JAR_SEED}), "
           f"Kid {created['kid_1']['id']} (${KID_SEED}); expected total ${EXPECTED_TOTAL}")
 
-    # --- (A) read each sub-account's settled current_balance independently (the per-card
-    # figures the Home jar/kid cards render). ---
-    main_bal, main_ok = _poll_balance(main_email, MAIN_SEED, SETTLE_BUDGET_S)
-    jar_bal, jar_ok = _poll_balance(jar_email, JAR_SEED, SETTLE_BUDGET_S)
-    kid_bal, kid_ok = _poll_balance(kid_email, KID_SEED, SETTLE_BUDGET_S)
+    # --- (A) read each account's settled balance independently (the per-card figures
+    # the Home jar/kid cards render). Main/kid via their own logins; the jar via the
+    # PARENT session's jars API (jars have no loginable identity). ---
+    main_bal, main_ok = _poll_balance(
+        lambda: current_balance(main_email, SEEDED_PWD), "main", MAIN_SEED, SETTLE_BUDGET_S)
+    jar_bal, jar_ok = _poll_balance(
+        lambda: jar_balance_by_name(main_email, JAR_NAME, SEEDED_PWD),
+        f"jar '{JAR_NAME}'", JAR_SEED, SETTLE_BUDGET_S)
+    kid_bal, kid_ok = _poll_balance(
+        lambda: current_balance(kid_email, SEEDED_PWD), "kid", KID_SEED, SETTLE_BUDGET_S)
 
     if main_bal is None or jar_bal is None or kid_bal is None:
-        pytest.skip("skip-with-reason: could not read back one or more sub-account "
-                    "balances (login/settle gate, not a product result): "
+        pytest.skip("skip-with-reason: could not read back one or more per-account "
+                    "balances (Main/kid own-login read, jar parent-session read — a "
+                    "login/settle gate, not a product result): "
                     f"Main={main_bal}, jar={jar_bal}, kid={kid_bal}")
 
     # Each component must have reached its own seed; otherwise we cannot distinguish a

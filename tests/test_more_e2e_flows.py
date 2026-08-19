@@ -533,8 +533,11 @@ class TestRecurringInvestmentsE2E:
         savings goal (both verified on-device)."""
         recurring.open_main_portfolio()
         assert recurring.is_setup_screen()
-        assert recurring.is_present_now(recurring.SET_RECURRING_INVESTMENT), \
-            "Setup screen should offer 'Set Recurring Investment'"
+        # State-agnostic: the recurring CTA reads 'Set Recurring Investment' on an
+        # account with no recurring and 'Edit Recurring Investment' once one exists
+        # (shared UI account state varies) — either proves the offer is present.
+        assert recurring.is_present_now(recurring.OPEN_RECURRING_FORM_CTA), \
+            "Setup screen should offer a recurring investment (Set or Edit CTA)"
         assert recurring.is_present_now(recurring.SET_SAVINGS_GOAL), \
             "Setup screen should offer 'Set Savings Goal'"
 

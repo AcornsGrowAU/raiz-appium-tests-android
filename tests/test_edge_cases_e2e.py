@@ -117,19 +117,21 @@ class TestAmountEntryEdgeCases:
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
     def test_dot_first_is_well_formed(self, lump_sum):
-        lump_sum.clear_amount()
+        # Fresh lump_sum fixture opens the keypad at $0.00 (proven by
+        # test_invest_zero_amount_reaches_confirmation's amount_is_zero precondition),
+        # and sibling tests enter directly without clearing first
+        # (test_multiple_decimal_points_are_rejected / _more_than_two_decimals_are_capped),
+        # so a leading clear_amount() is a redundant no-op here (EFF-10).
         lump_sum.enter_amount(".5")
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
     def test_leading_zeros_are_well_formed(self, lump_sum):
-        lump_sum.clear_amount()
         lump_sum.enter_amount("007")
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
     def test_large_amount_is_well_formed(self, lump_sum):
         """A 7-digit amount must render as well-formed money (comma grouping must
         not corrupt the value or break parsing)."""
-        lump_sum.clear_amount()
         lump_sum.enter_amount("1234567")
         display = lump_sum.get_amount_display()
         _assert_well_formed_amount(display)
@@ -139,7 +141,6 @@ class TestAmountEntryEdgeCases:
     def test_long_digit_run_does_not_corrupt_display(self, lump_sum):
         """Far more digits than any real investment — the display must not overflow
         into garbage or a negative."""
-        lump_sum.clear_amount()
         lump_sum.enter_amount("999999999")
         _assert_well_formed_amount(lump_sum.get_amount_display())
 
@@ -208,8 +209,10 @@ class TestHomeGreetingEdgeCases:
             assert token not in greeting, f"Greeting leaks a placeholder ({token!r}): {greeting!r}"
 
     def test_greeting_includes_a_name(self, home):
-        """The greeting should personalise — 'Hello' with nothing after it is the
-        empty-name variant of the same bug. (Greeting renders 'Hello <Name>,'.)"""
-        greeting = home.get_greeting()
-        name = greeting.replace("Hello", "", 1).strip(" ,!.") if "Hello" in greeting else ""
-        assert len(name) > 0, f"Greeting is not personalised (no name): {greeting!r}"
+        """The greeting should personalise — a bare salutation with nothing after
+        it is the empty-name variant of the same bug. (Greeting renders e.g.
+        'Hello <Name>,' on legacy or 'Welcome <Name>' on the redesign.) Derive the
+        name via the page object's get_greeting_name() rather than inline-stripping
+        a single hard-coded 'Hello', so the check holds on both builds."""
+        name = home.get_greeting_name()
+        assert len(name) > 0, f"Greeting is not personalised (no name): {home.get_greeting()!r}"

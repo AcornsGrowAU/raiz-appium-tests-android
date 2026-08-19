@@ -219,7 +219,7 @@ class TestCustomPortfolioPlusE2E:
         fx = get_or_create_fixture_user("plan_plus")
 
         def _build():
-            opts = get_android_options(no_reset=False)
+            opts = get_android_options(no_reset=False, secondary=True)
             opts.udid = _PLUS_UDID
             opts.set_capability("adbExecTimeout", 120000)
             opts.set_capability("appWaitDuration", 60000)

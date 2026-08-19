@@ -14,6 +14,7 @@ utils.genuser_api).
                             draw a tiny amount ($5) each, so one user serves thousands
                             of runs without re-seeding.
 """
+import functools
 import json
 import os
 import time
@@ -126,11 +127,22 @@ FIXTURES = {
     # in Transaction History whose parsed amount == the seeded value (TC-11 ledger oracle),
     # and current_balance == the deposit exactly. user_1 is the login user.
     "history_seeded_deposit": (
+        # transfer_initiator is REQUIRED for feed visibility: a credit seeded straight
+        # to shares_settled has transferred_by_id NULL and is permanently filtered out
+        # of GET /v3/investments (the exact feed the History screen reads) — the ledger
+        # test would see zero rows. Mirrors the inflow_seeded recipe below.
         lambda email: {
             "user_1": funded_user(email, "HistDeposit"),
-            "deposit_1": ach_credit("@user_1", HISTORY_SEEDED_DEPOSIT),
+            "deposit_1": {
+                "model": "credit_investment",
+                "traits": ["lump_sum", "with_shares_settled_status", "with_holdings",
+                           "transfer_initiator"],
+                "attributes": {"user": "@user_1", "amount": HISTORY_SEEDED_DEPOSIT,
+                               "created_at": "2024-01-01", "payment_method": "ACH"},
+            },
         },
-        f"user with one known ${HISTORY_SEEDED_DEPOSIT} ACH credit for transaction-history ledger test",
+        f"user with one known ${HISTORY_SEEDED_DEPOSIT} ACH credit (transfer_initiator -> "
+        "renders as a History 'Buy' row) for the transaction-history ledger test",
     ),
     # Two kid sub-accounts of DISTINCT ACH-settled balances under ONE parent (TC-03):
     # log in AS the parent, open Kids, assert each rendered kid-card value == that kid's
@@ -368,18 +380,32 @@ FIXTURES = {
     # Moderately Conservative/Moderate portfolios. Each tier user is funded with $100
     # exact ACH so the on-device tests reach Home. Pair the Lite user with a Regular
     # control in the same run (tier-gating-kids-jars asserts gating STATE).
+    #
+    # DURABLE PLAN (fixture-lifecycle fix, 2026-07-14): the stock `with_active_plan`
+    # user trait creates its user_plan row via the backend user_plan FACTORY DEFAULT
+    # `end_at { 5.days.from_now }` (raiz-backend spec/factories/user_plan.rb) — so a
+    # REUSED tier fixture silently LOSES its active plan 5 days after seeding
+    # (UserPlan.active requires end_at >= now; user.plan is has_one through
+    # active_user_plan) while still logging in fine, and the reuse gate (can_login)
+    # never re-seeds it. Verified live 2026-07-14: 20-day-old fixture -> /v1/plans
+    # current_plan false on ALL entries; fresh seed -> exactly one true.
+    # Fix: seed the tier users through _tier_rows below — the user is built WITHOUT
+    # with_active_plan and the active plan is an EXPLICIT user_plan row with a
+    # far-future end_at, so the entitlement never expires and the fixture stays
+    # reusable indefinitely. (Two concurrent rows are impossible — DB exclusion
+    # constraint no_overlapping_user_plans — hence replace-the-trait, not add-a-row.)
     "plan_lite": (
-        lambda email: {"user_1": tiered_user(email, "PlanLite", "starter", STYLE_MODERATE),
+        lambda email: {**_tier_rows(email, "PlanLite", "starter", STYLE_MODERATE),
                        **ach_credits("@user_1", 100.00, prefix="pll")},
         "STARTER ('Lite') plan user on Moderate (kids/jars upgrade-gated at API + UI)",
     ),
     "plan_regular": (
-        lambda email: {"user_1": tiered_user(email, "PlanRegular", "regular", STYLE_AGGRESSIVE),
+        lambda email: {**_tier_rows(email, "PlanRegular", "regular", STYLE_AGGRESSIVE),
                        **ach_credits("@user_1", 100.00, prefix="plr")},
         "REGULAR plan user (kids/jars enabled) — control for tier-gating",
     ),
     "plan_plus": (
-        lambda email: {"user_1": tiered_user(email, "PlanPlus", "plus", STYLE_AGGRESSIVE),
+        lambda email: {**_tier_rows(email, "PlanPlus", "plus", STYLE_AGGRESSIVE),
                        **ach_credits("@user_1", 100.00, prefix="plp")},
         "PLUS plan user (kids/jars enabled; custom builder) — control for tier-gating",
     ),
@@ -400,6 +426,26 @@ FIXTURES = {
         "-> true empty My Finance spend state",
     ),
 }
+
+
+def _tier_rows(email, first, plan_identifier, portfolio_name):
+    """Payload rows for a DURABLE plan-tier fixture user (see the tier-gating block
+    comment above). Returns {"user_1": <user WITHOUT with_active_plan>,
+    "user_plan_1": <explicit active user_plan row, end_at far-future>} so the seeded
+    entitlement never hits the user_plan factory's 5-day default expiry.
+    `plan_identifier` doubles as the user_plan factory trait name (the backend factory
+    defines exactly :starter/:regular/:plus traits — spec/factories/user_plan.rb).
+    Order matters: user_1 must precede user_plan_1 for @user_1 to resolve."""
+    u = tiered_user(email, first, plan_identifier, portfolio_name)
+    # with_active_plan would create the 5-day-expiring row (and its transient
+    # plan_identifier attr is only valid alongside the trait) — strip both.
+    u["traits"].remove("with_active_plan")
+    del u["attributes"]["plan_identifier"]
+    return {
+        "user_1": u,
+        "user_plan_1": {"model": "user_plan", "traits": [plan_identifier],
+                        "attributes": {"user": "@user_1", "end_at": "2099-01-01"}},
+    }
 
 
 def _unlinked_user(email, first):
@@ -425,17 +471,38 @@ def _save(reg):
         json.dump(reg, fh, indent=2)
 
 
+# Fixtures whose REGISTRY email is a JAR sub-account. Jars have no loginable
+# identity (/v1/sessions with a jar email 401s by design), so the reuse gate must
+# probe the derived PARENT email instead — otherwise the gate always fails and
+# every access re-seeds the whole rig from scratch.
+_LOGIN_EMAIL_OF = {
+    "jars_withdrawal_buffer": lambda email: "jp." + email,
+}
+
+
+@functools.lru_cache(maxsize=None)
 def get_or_create_fixture_user(key):
     """Return the stored fixture user for `key` (reused if it still logs in), else
     seed a fresh one, store it, and return it. Returns a dict with at least
-    email/password/user_id/onboarded."""
+    email/password/user_id/onboarded.
+
+    Memoised per `key` (lru_cache) so the reuse GATE — the can_login() probe (and,
+    on a miss, the seed) — runs at most ONCE per process. Later calls for the same
+    key return the cached rec without another /v1/sessions round-trip (EFF-03).
+    The SAME dict object is handed back on every call: this is safe because no
+    caller mutates the returned rec (every consumer only reads email/password/
+    user_id/reused/onboarded). `reused` therefore reflects the FIRST resolution for
+    the life of the process (a diagnostic/log flag, not an oracle). mark_onboarded()
+    persists `onboarded` to the on-disk registry, independent of this cache."""
     if key not in FIXTURES:
         raise KeyError(f"unknown fixture '{key}'; known: {list(FIXTURES)}")
     reg = _load()
     rec = reg.get(key)
-    if rec and can_login(rec["email"], rec.get("password", SEEDED_PWD)):
-        rec["reused"] = True
-        return rec
+    if rec:
+        login_email = _LOGIN_EMAIL_OF.get(key, lambda e: e)(rec["email"])
+        if can_login(login_email, rec.get("password", SEEDED_PWD)):
+            rec["reused"] = True
+            return rec
 
     builder, _ = FIXTURES[key]
     email = f"fixture.{key}.{int(time.time())}@emel.xyz"

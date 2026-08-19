@@ -14,7 +14,7 @@
     "password": "Pass1234",
     "user_id": 42058,
     "created_at": 1782256999,
-    "onboarded": false,
+    "onboarded": true,
     "reused": false
   },
   "kids_withdrawal_buffer": {
@@ -37,11 +37,11 @@
   },
   "history_seeded_deposit": {
     "key": "history_seeded_deposit",
-    "email": "fixture.history_seeded_deposit.1782257002@emel.xyz",
+    "email": "fixture.history_seeded_deposit.1784007997@emel.xyz",
     "password": "Pass1234",
-    "user_id": 42063,
-    "created_at": 1782257002,
-    "onboarded": false,
+    "user_id": 43743,
+    "created_at": 1784007998,
+    "onboarded": true,
     "reused": false
   },
   "kids_siblings_distinct": {
@@ -113,7 +113,7 @@
     "password": "Pass1234",
     "user_id": 42129,
     "created_at": 1782271283,
-    "onboarded": false,
+    "onboarded": true,
     "reused": false
   },
   "jar_progress_ring": {
@@ -170,33 +170,6 @@
     "onboarded": false,
     "reused": false
   },
-  "plan_lite": {
-    "key": "plan_lite",
-    "email": "fixture.plan_lite.1782271291@emel.xyz",
-    "password": "Pass1234",
-    "user_id": 42144,
-    "created_at": 1782271292,
-    "onboarded": false,
-    "reused": false
-  },
-  "plan_regular": {
-    "key": "plan_regular",
-    "email": "fixture.plan_regular.1782271292@emel.xyz",
-    "password": "Pass1234",
-    "user_id": 42145,
-    "created_at": 1782271292,
-    "onboarded": false,
-    "reused": false
-  },
-  "plan_plus": {
-    "key": "plan_plus",
-    "email": "fixture.plan_plus.1782281371@emel.xyz",
-    "password": "Pass1234",
-    "user_id": 42567,
-    "created_at": 1782281380,
-    "onboarded": true,
-    "reused": false
-  },
   "myfinance_unlinked": {
     "key": "myfinance_unlinked",
     "email": "fixture.myfinance_unlinked.1782273308@emel.xyz",
@@ -221,6 +194,24 @@
     "password": "Pass1234",
     "user_id": 42255,
     "created_at": 1782273549,
+    "onboarded": false,
+    "reused": false
+  },
+  "plan_lite": {
+    "key": "plan_lite",
+    "email": "fixture.plan_lite.1784007783@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 43741,
+    "created_at": 1784007784,
+    "onboarded": false,
+    "reused": false
+  },
+  "plan_regular": {
+    "key": "plan_regular",
+    "email": "fixture.plan_regular.1784007784@emel.xyz",
+    "password": "Pass1234",
+    "user_id": 43742,
+    "created_at": 1784007784,
     "onboarded": false,
     "reused": false
   }

@@ -20,12 +20,14 @@ THE ORACLE (independent — the whole point of this case)
 
   To make the oracle INDEPENDENT of the screen's source (so a single wrong
   aggregate can't be "reconciled" against itself), we do NOT trust the aggregate
-  field for the right-hand side. We reconstruct the sum from each sub-account's
-  OWN `current_balance`, read by logging in AS that account separately (Main
-  parent, the jar sub-user, the kid sub-user) — exactly how the no-cross-post
-  test reads per-account ground truth. Two genuinely different code paths
-  (aggregate view vs per-account holdings) must agree. This is the RAIZ-10251
-  "totals don't add up" defect family.
+  field for the right-hand side. We reconstruct the sum from each account's OWN
+  balance, read separately: Main and the kid by logging in AS that account (kids
+  have account_access), and the jar via the PARENT session's jars API
+  (`accumulated_amount` == the jar's own balance) — jars are sub-accounts of the
+  main account with NO loginable identity (a jar-email /v1/sessions 401s by
+  design). None of these per-account reads touches the aggregate field. Two
+  genuinely different code paths (aggregate view vs per-account holdings) must
+  agree. This is the RAIZ-10251 "totals don't add up" defect family.
 
 DE-DUPE vs home-total-conservation (#4)
   #4 asserts the HOME headline conserves across a transfer. THIS case is scoped
@@ -39,8 +41,9 @@ WHY v3
 
 DATA — pre-provisioned `conserve_main_jar_kid` fixture (reuse strategy):
   Main $300.00 + 1 jar $80.00 + 1 kid $40.00, all seeded with small EXACT settled
-  ACH credits (NOT the repricing buffer). Sub-accounts live at deterministic
-  addresses derived from the parent: jar = cj.<parent>, kid = ck.<parent>
+  ACH credits (NOT the repricing buffer). The kid lives at a deterministic
+  loginable address derived from the parent (kid = ck.<parent>); the jar is
+  addressed by its NAME ('QA Conserve Jar') through the parent session
   (utils.genuser_fixtures FIXTURES['conserve_main_jar_kid']). Settled ACH lands on
   the exact dollar amount and stays stable (cent-level holding settlement only),
   so both the inputs and the recon are read precisely.
@@ -55,7 +58,9 @@ import urllib.request
 
 import pytest
 
-from utils.genuser_api import API, SEEDED_PWD, call, current_balance, mint
+from utils.genuser_api import (
+    API, SEEDED_PWD, call, mint,
+)
 from utils.genuser_fixtures import (
     CONSERVE_MAIN_BALANCE,
     CONSERVE_JAR_BALANCE,
@@ -73,22 +78,83 @@ SEED_JAR = CONSERVE_JAR_BALANCE     # 80.00
 SEED_KID = CONSERVE_KID_BALANCE     # 40.00
 SEED_TOTAL = round(SEED_MAIN + SEED_JAR + SEED_KID, 2)  # 420.00
 
-# Settled ACH lands on the exact dollar; only sub-dollar holding-settlement drift
-# is allowed when anchoring each account to its seed.
-SEED_BAND = 2.00
+# Settled ACH lands on the exact dollar, but the holdings are MARKET-PRICED and
+# the reused fixture lives for weeks — unit prices drift the balances a few
+# percent off the seeds (measured 2.25% on 2026-07-13 across all fixtures). The
+# seed anchor is only an anti-garbage gate (a $0 / truncated / wrong-account read
+# is >>8% off); the real oracle below is drift-immune because the independent sum
+# and the displayed aggregate move together. Band: 8% of each seed, $2 floor.
+def _seed_band(seed):
+    return max(2.00, seed * 0.08)
 # The aggregate field and the independent per-account sum are the SAME numbers
 # (one summed server-side, one summed by us) — they must agree to the cent.
 RECON_BAND = 0.05
 
 
-def _jar_email(parent_email):
-    """Jar sub-account address (FIXTURES['conserve_main_jar_kid']: jar_user('cj.'+email,...))."""
-    return "cj." + parent_email
+# Jar card name (FIXTURES['conserve_main_jar_kid']: jar_user('cj.'+email, ...,
+# "QA Conserve Jar")). Jars have NO loginable identity — the jar is read by this
+# name through the PARENT session (jar_balance_by_name), never by minting a token
+# for its derived cj.<parent> address.
+CONSERVE_JAR_NAME = "QA Conserve Jar"
 
 
 def _kid_email(parent_email):
     """Kid sub-account address (FIXTURES['conserve_main_jar_kid']: kid_user('ck.'+email,...))."""
     return "ck." + parent_email
+
+
+class _BalanceReader:
+    """EFF-02: reuse ONE minted /v1/sessions token per account across its balance
+    reads (the sessions endpoint is rate-limited; current_balance() +
+    jar_balance_by_name() would each mint a SEPARATE login for the SAME parent). The
+    parent reader serves both the Main /v1/user balance AND the parent-session jars
+    read; a second reader serves the kid's own login. Re-mints only when a cached
+    token is rejected (401), mirroring the withdrawal value tests' _BalanceReader.
+    Every read returns a float or None on failure — the oracle values are unchanged.
+    (The v3-user read keeps its own fresh-mint-per-attempt retry, mirroring the
+    home-total-conservation reader.)"""
+
+    def __init__(self, email, pwd=SEEDED_PWD):
+        self.email, self.pwd = email, pwd
+        self._op = self._tok = None
+
+    def _ensure(self):
+        if self._tok is None:
+            self._op, self._tok = mint(self.email, self.pwd)
+        return self._tok is not None
+
+    def _get(self, path):
+        for _ in range(2):  # one retry: re-mint if the cached token was rejected
+            if not self._ensure():
+                self._op = self._tok = None
+                return None, None
+            s, b = call(self._op, "GET", path, token=self._tok)
+            if s != 401:
+                return s, b
+            self._op = self._tok = None
+        return None, None
+
+    def current_balance(self):
+        """The account's own current_balance (GET /v1/user), or None on failure."""
+        s, b = self._get("/v1/user")
+        if s != 200:
+            return None
+        user = b.get("user", b) if isinstance(b, dict) else {}
+        cb = user.get("current_balance")
+        return float(cb) if cb is not None else None
+
+    def jar_balance(self, name):
+        """The named jar's accumulated_amount read via THIS (parent) session, or None.
+        Jars have no loginable identity — the parent's jars list carries the jar's own
+        balance."""
+        s, b = self._get("/jars/v1/users")
+        if s != 200 or not isinstance(b, dict):
+            return None
+        for j in b.get("jar_users", []):
+            if isinstance(j, dict) and j.get("name") == name:
+                amt = j.get("accumulated_amount")
+                return float(amt) if amt is not None else None
+        return None
 
 
 def _read_v3_user(op, token):
@@ -145,36 +211,48 @@ def test_my_finance_total_investments_reconciles_with_independent_backend_sum():
 
     Two genuinely separate code paths must agree:
       A) the aggregate the screen renders  (v3 user.investing_accounts_balance)
-      B) Σ of each sub-account's own current_balance, read account-by-account.
+      B) Σ of each account's own balance, read account-by-account (Main/kid via
+         their own logins, the jar via the parent session's jars API —
+         accumulated_amount — since jars have no loginable identity).
     A wrong aggregate cannot be reconciled against itself because B never reads
     the aggregate field.
     """
     parent = get_or_create_fixture_user(FIXTURE_KEY)
     parent_email, pwd = parent["email"], parent.get("password", SEEDED_PWD)
-    jar_email, kid_email = _jar_email(parent_email), _kid_email(parent_email)
+    kid_email = _kid_email(parent_email)
     print(f"  fixture parent {parent_email} (reused={parent.get('reused')})")
-    print(f"  jar {jar_email}  kid {kid_email}")
+    print(f"  jar '{CONSERVE_JAR_NAME}' (parent-session read)  kid {kid_email}")
 
-    # ---- B) Independent per-account oracle: each account's OWN current_balance,
-    #         read by logging in AS that account (no aggregate field involved). ----
-    bal_main = current_balance(parent_email, pwd)
-    bal_jar = current_balance(jar_email, SEEDED_PWD)
-    bal_kid = current_balance(kid_email, SEEDED_PWD)
+    # ---- B) Independent per-account oracle: each account's OWN balance. Main and
+    #         the kid are read by logging in AS that account; the jar (no loginable
+    #         identity) is read through the PARENT session's jars API — its own
+    #         accumulated_amount, NOT the aggregate field. ----
+    # EFF-02: one parent token reused for BOTH the Main balance and the jar read
+    # (was two separate parent logins); the kid keeps its own login (different
+    # account). None on failure preserves the existing 'could not read' assertion.
+    parent_reader = _BalanceReader(parent_email, pwd)
+    bal_main = parent_reader.current_balance()
+    bal_jar = parent_reader.jar_balance(CONSERVE_JAR_NAME)
+    bal_kid = _BalanceReader(kid_email, SEEDED_PWD).current_balance()
     print(f"  per-account balances: main={bal_main} jar={bal_jar} kid={bal_kid}")
 
     assert None not in (bal_main, bal_jar, bal_kid), (
-        f"could not read every sub-account balance independently "
-        f"(main={bal_main}, jar={bal_jar}, kid={bal_kid}) — fixture login/read "
-        f"failed; cannot build the independent oracle")
+        f"could not read every per-account balance independently "
+        f"(main={bal_main}, jar={bal_jar} via parent-session jars API "
+        f"['{CONSERVE_JAR_NAME}'], kid={bal_kid}) — fixture login/read failed; "
+        f"cannot build the independent oracle")
 
     # Anchor each input to its EXACT seed: a 420 total is only a meaningful oracle
     # if it is built from the seeded $300/$80/$40, not from drifted/garbled parts.
-    assert bal_main == pytest.approx(SEED_MAIN, abs=SEED_BAND), (
-        f"Main balance ${bal_main} drifted from its seed ${SEED_MAIN}")
-    assert bal_jar == pytest.approx(SEED_JAR, abs=SEED_BAND), (
-        f"jar balance ${bal_jar} drifted from its seed ${SEED_JAR}")
-    assert bal_kid == pytest.approx(SEED_KID, abs=SEED_BAND), (
-        f"kid balance ${bal_kid} drifted from its seed ${SEED_KID}")
+    assert bal_main == pytest.approx(SEED_MAIN, abs=_seed_band(SEED_MAIN)), (
+        f"Main balance ${bal_main} is not at the seeded ~${SEED_MAIN} level "
+        f"(±${_seed_band(SEED_MAIN):.2f}) — garbage/truncated read, not market drift")
+    assert bal_jar == pytest.approx(SEED_JAR, abs=_seed_band(SEED_JAR)), (
+        f"jar balance ${bal_jar} is not at the seeded ~${SEED_JAR} level "
+        f"(±${_seed_band(SEED_JAR):.2f}) — garbage/truncated read, not market drift")
+    assert bal_kid == pytest.approx(SEED_KID, abs=_seed_band(SEED_KID)), (
+        f"kid balance ${bal_kid} is not at the seeded ~${SEED_KID} level "
+        f"(±${_seed_band(SEED_KID):.2f}) — garbage/truncated read, not market drift")
 
     independent_sum = round(bal_main + bal_jar + bal_kid, 2)
     print(f"  independent sum (Main+jar+kid) = ${independent_sum}")
@@ -195,9 +273,10 @@ def test_my_finance_total_investments_reconciles_with_independent_backend_sum():
 
     # Sanity: the aggregate must itself be near the seeded grand total (catches a
     # field that is well-formed money but reads some unrelated balance).
-    assert screen_value == pytest.approx(SEED_TOTAL, abs=3 * SEED_BAND), (
+    assert screen_value == pytest.approx(SEED_TOTAL, abs=_seed_band(SEED_TOTAL)), (
         f"'Total in investments' ${screen_value} is nowhere near the seeded "
-        f"grand total ${SEED_TOTAL} (Main+jar+kid) — wrong source field")
+        f"grand total ${SEED_TOTAL} (Main+jar+kid, ±${_seed_band(SEED_TOTAL):.2f}) "
+        "— wrong source field")
 
     # ---- The reconciliation: screen aggregate == independent per-account sum. ----
     # Both are summing the same three current balances; they must match to the

@@ -57,6 +57,8 @@ Determinism / honesty:
 Run (no emulator):
   venv/bin/python -m pytest tests/test_portfolio_style_allocation_weights.py -v -s -o addopts=""
 """
+import time
+
 import pytest
 
 from utils.genuser_api import SEEDED_PWD, call, mint
@@ -66,6 +68,14 @@ from utils.genuser_fixtures import (
 )
 
 pytestmark = pytest.mark.value_api
+
+# A read that fails TRANSIENTLY (no token from a rate-limited /v1/sessions, a 5xx, or a
+# network blip) is retried a bounded number of times before we fall through to SKIP, so a
+# rate-limit blip no longer silently NO-RUNS the mix/label oracle. A genuine GATE (a real
+# non-2xx contract response / a missing allocation_profile_id) skips immediately — it is a
+# product/seed fact, not a blip. Mirrors test_networth_total_investments_recon._get_v3_user.
+_READ_ATTEMPTS = 3
+_READ_RETRY_DELAY_S = 8
 
 # Each published portfolio's weights must sum to 100%. Backend FundRatio.ratio values
 # are whole-number percents; tiny rounding across a handful of ETFs is expected, so
@@ -119,41 +129,78 @@ def _mix(portfolio):
     return {k: round(v, 4) for k, v in mix.items()}
 
 
-def _read_style(fixture_key):
-    """Resolve a seeded style user's ACTUAL portfolio off the DEV API.
+def _read_style_once(fixture_key, email):
+    """ONE attempt to resolve a seeded style user's portfolio off the DEV API.
 
-    Returns a dict {label, mix, uuid} where:
-      - label = the portfolio's own name on the detail endpoint (the persisted style),
-      - mix   = {symbol: percent} (whole-number percents; see _mix),
-      - uuid  = the user's allocation_profile_id (the portfolio it is wired to),
-    or a string starting with 'SKIP:' describing the gate that blocked the read."""
-    rec = get_or_create_fixture_user(fixture_key)
-    email = rec["email"]
-
+    Returns:
+      dict {label, mix, uuid}   on success,
+      ('GATE', reason)          on a genuine gate (missing allocation_profile_id, a real
+                                non-2xx contract response, or absent name/weights),
+      ('TRANSIENT', reason)     on a retriable blip (no token / 5xx / network error)."""
     op, tok = mint(email, SEEDED_PWD)
     if not tok:
-        return f"SKIP: could not log in as {fixture_key} ({email}) (auth/rate-limit gate)"
+        return ("TRANSIENT", f"could not log in as {fixture_key} ({email}) (auth/rate-limit)")
 
-    s, b = call(op, "GET", "/v1/user", token=tok)
+    try:
+        s, b = call(op, "GET", "/v1/user", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /v1/user for {fixture_key}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /v1/user for {fixture_key} returned HTTP {s} (server error)")
     if s != 200 or not isinstance(b, dict):
-        return f"SKIP: GET /v1/user for {fixture_key} returned HTTP {s} (read gate)"
+        return ("GATE", f"GET /v1/user for {fixture_key} returned HTTP {s} (read gate)")
     user = b.get("user", b)
     uuid = user.get("allocation_profile_id")
     if not uuid:
-        return (f"SKIP: {fixture_key} has no allocation_profile_id (no portfolio wired "
+        return ("GATE", f"{fixture_key} has no allocation_profile_id (no portfolio wired "
                 "to the user) — seed gate, not a product result")
 
-    s, b = call(op, "GET", f"/v1/portfolios/{uuid}", token=tok)
+    try:
+        s, b = call(op, "GET", f"/v1/portfolios/{uuid}", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /v1/portfolios/{uuid} for {fixture_key}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /v1/portfolios/{uuid} for {fixture_key} returned HTTP {s} "
+                "(server error)")
     if s != 200 or not isinstance(b, dict):
-        return (f"SKIP: GET /v1/portfolios/{uuid} for {fixture_key} returned HTTP {s} "
+        return ("GATE", f"GET /v1/portfolios/{uuid} for {fixture_key} returned HTTP {s} "
                 "(portfolio detail read gate)")
     portfolio = b.get("portfolio", b)
     label = portfolio.get("name")
     mix = _mix(portfolio)
     if not label or not mix:
-        return (f"SKIP: portfolio detail for {fixture_key} missing name/weights "
+        return ("GATE", f"portfolio detail for {fixture_key} missing name/weights "
                 f"(name={label!r}, rows={0 if not mix else len(mix)}) — read gate")
     return {"label": label, "mix": mix, "uuid": uuid}
+
+
+def _read_style(fixture_key):
+    """Resolve a seeded style user's ACTUAL portfolio off the DEV API, with a BOUNDED
+    retry that distinguishes a TRANSIENT failure (no token / 5xx / network — a
+    /v1/sessions rate-limit blip must not silently no-run the oracle) from a genuine GATE
+    (missing allocation_profile_id / real non-2xx). Mints a FRESH token per attempt and
+    retries ONLY the transient; a real gate skips immediately.
+
+    Returns a dict {label, mix, uuid} (label = the portfolio's own name on the detail
+    endpoint; mix = {symbol: percent}; uuid = the user's allocation_profile_id), or a
+    string starting with 'SKIP:' describing the gate that blocked the read (unchanged
+    contract for the caller)."""
+    rec = get_or_create_fixture_user(fixture_key)
+    email = rec["email"]
+
+    last = None
+    for i in range(_READ_ATTEMPTS):
+        r = _read_style_once(fixture_key, email)
+        if isinstance(r, dict):
+            return r
+        kind, reason = r
+        if kind == "GATE":
+            return "SKIP: " + reason
+        last = reason
+        print(f"  [read_style {fixture_key} attempt {i + 1}/{_READ_ATTEMPTS}] transient: {reason}")
+        if i < _READ_ATTEMPTS - 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+    return f"SKIP: {last} (persisted across {_READ_ATTEMPTS} bounded retries)"
 
 
 def _sum(mix):

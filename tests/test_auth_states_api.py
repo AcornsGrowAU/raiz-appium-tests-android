@@ -16,55 +16,29 @@ current contract so a regression is caught.
 
 Run:  venv/bin/python -m pytest tests/test_auth_states_api.py -v -s -o addopts=""
 """
-import http.cookiejar
-import json
 import os
 import time
-import urllib.error
-import urllib.request
 
 import pytest
 
+from utils.genuser_api import SEEDED_PWD, UDID, call, gen_create, opener
+
 pytestmark = pytest.mark.value_api
-
-API = "https://api-dev.raizinvest.com.au"
-UDID = "2204bb70-d6f7-4ccd-ad49-94d9b420feaa"
-GEN_EMAIL = os.getenv("GEN_EMAIL", "anmol@raizinvest.com.au")
-GEN_PWD = os.getenv("GEN_PWD", "TestDemo123")
-SEEDED_PWD = "Pass1234"
-RHO_MAX_RETRIES = int(os.getenv("RHO_MAX_RETRIES", "30"))
-
-
-def _opener():
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-
-
-def _call(opener, method, path, token=None, body=None, timeout=40):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
-    for h, v in (("content-type", "application/json"), ("accept", "application/json"), ("x-version", "v1")):
-        req.add_header(h, v)
-    if token:
-        req.add_header("Authorization", f"token {token}")
-    try:
-        with opener.open(req, timeout=timeout) as r:
-            raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode()
-        try:
-            return e.code, json.loads(raw)
-        except Exception:
-            return e.code, raw
 
 
 def _mint(email, pwd, budget_s=180):
-    """Login -> (opener, token, status, body). Backoff through the rate-limit 400."""
+    """Login -> (opener, token, status, body). Backoff through the rate-limit 400.
+
+    A LOCAL variant of utils.genuser_api.mint that ALSO returns the HTTP status and
+    response body: the no-enumeration oracle below asserts the wrong-password and
+    unknown-email response BODIES are byte-identical, and _closed_at surfaces the
+    login status — richer returns that the 2-tuple canonical mint() discards. Reuses
+    the canonical opener()/call() plumbing so only the return shape differs."""
     body = {"email": email, "password": pwd, "remember": False, "udid": UDID}
     waited, delay = 0, 8
     while True:
-        op = _opener()
-        status, payload = _call(op, "POST", "/v1/sessions", body=body)
+        op = opener()
+        status, payload = call(op, "POST", "/v1/sessions", body=body)
         tok = payload.get("token") if isinstance(payload, dict) else None
         if status in (200, 201) and tok:
             return op, tok, status, payload
@@ -74,24 +48,6 @@ def _mint(email, pwd, budget_s=180):
         time.sleep(delay)
         waited += delay
         delay = min(delay * 2, 60)
-
-
-def _gen(payload):
-    """Mint a fresh gen token per attempt; retry the rho_settled_at flap."""
-    status, body = None, None
-    for _ in range(RHO_MAX_RETRIES):
-        op, tok, _, _ = _mint(GEN_EMAIL, GEN_PWD)
-        if not tok:
-            time.sleep(8)
-            continue
-        status, body = _call(op, "POST", "/internal/v1/test_data_generation",
-                             token=tok, body={"payload": payload})
-        errs = body.get("errors", []) if isinstance(body, dict) else []
-        if status == 422 and any("rho_settled_at" in str(e) for e in errs):
-            time.sleep(8)
-            continue
-        return status, body
-    return status, body
 
 
 def _user(traits, email, first, extra=None):
@@ -107,13 +63,16 @@ def _closed_at(email):
     """Log in as the user and return closed_at from GET /v1/user (None if absent)."""
     op, tok, status, _ = _mint(email, SEEDED_PWD)
     assert tok, f"could not log in as {email}: HTTP {status}"
-    s, body = _call(op, "GET", "/v1/user", token=tok)
+    s, body = call(op, "GET", "/v1/user", token=tok)
     assert s == 200, f"GET /v1/user -> {s}"
     return (body.get("user", {}) if isinstance(body, dict) else {}).get("closed_at"), status
 
 
 def _ts():
-    return str(int(time.time()))
+    # PID-qualified timestamp: avoid same-second email collisions when the suite
+    # runs across the parallel multi-emulator rig / reruns (each worker is a
+    # distinct process). Mirrors test_auth_account_states_api.py:106.
+    return f"{int(time.time())}.{os.getpid()}"
 
 
 def test_closed_account_authenticates_and_reflects_closed_at():
@@ -128,7 +87,7 @@ def test_closed_account_authenticates_and_reflects_closed_at():
         "closed": _user(["closed", "with_user_profile", "verified"], closed_email, "StClosed",
                         extra={"closed_at": "2024-02-01"}),
     }
-    status, body = _gen(payload)
+    status, body = gen_create(payload)
     assert status == 200, f"create failed: HTTP {status} {body}"
 
     good_closed_at, good_login = _closed_at(good_email)
@@ -147,7 +106,7 @@ def test_login_does_not_enumerate_users():
     body — the API must not reveal whether an email exists."""
     ts = _ts()
     good_email = f"st.enum.{ts}@emel.xyz"
-    status, body = _gen({"good": _user(["with_user_profile", "verified"], good_email, "StEnum")})
+    status, body = gen_create({"good": _user(["with_user_profile", "verified"], good_email, "StEnum")})
     assert status == 200, f"create failed: HTTP {status} {body}"
 
     _, _, wrong_status, wrong_body = _mint(good_email, "WrongPass999", budget_s=60)

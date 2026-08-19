@@ -48,23 +48,15 @@ SCOPE / REFINEMENTS honoured:
 Run (no emulator):
   venv/bin/python -m pytest tests/test_funding_source_contents.py -v -s -o addopts=""
 """
-import http.cookiejar
-import json
+import os
 import re
 import time
-import urllib.error
-import urllib.request
 
 import pytest
 
-pytestmark = pytest.mark.value_api
+from utils.genuser_api import SEEDED_PWD, call, gen_create, mint
 
-API = "https://api-dev.raizinvest.com.au"
-UDID = "2204bb70-d6f7-4ccd-ad49-94d9b420feaa"
-GEN_EMAIL = "anmol@raizinvest.com.au"
-GEN_PWD = "TestDemo123"
-SEEDED_PWD = "Pass1234"
-RHO_MAX_RETRIES = 30
+pytestmark = pytest.mark.value_api
 
 # Deterministic seed values for the funding source the test renders.
 SEED_BANK_NAME = "Commonwealth Bank"
@@ -78,68 +70,11 @@ _FORMAT_TOKEN_RE = re.compile(r"%[0-9]*\$?[sdf@]|\{\d+\}")  # printf / java Mess
 _MASK_TAIL_RE = re.compile(r"^\d{2,}$")
 
 
-def _opener():
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-
-
-def _call(opener, method, path, token=None, body=None, timeout=60):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
-    req.add_header("content-type", "application/json")
-    req.add_header("accept", "application/json")
-    req.add_header("x-version", "v1")
-    if token:
-        req.add_header("Authorization", f"token {token}")
-    try:
-        with opener.open(req, timeout=timeout) as r:
-            raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode()
-        try:
-            return e.code, json.loads(raw)
-        except Exception:
-            return e.code, raw
-
-
-def _mint(email, pwd, label="", budget_s=180):
-    """Login on a FRESH opener (cookie jar carries the session) — backoff through the
-    /v1/sessions rate-limit (400)."""
-    body = {"email": email, "password": pwd, "remember": False, "udid": UDID}
-    waited, delay = 0, 8
-    while waited <= budget_s:
-        op = _opener()
-        status, payload = _call(op, "POST", "/v1/sessions", body=body)
-        if status in (200, 201) and isinstance(payload, dict) and payload.get("token"):
-            return op, payload["token"]
-        print(f"  [login {label or email}] HTTP {status} {str(payload)[:50]} -> sleep {delay}s")
-        time.sleep(delay)
-        waited += delay
-        delay = min(delay * 2, 60)
-    return None, None
-
-
-def _create(payload):
-    """Mint a FRESH gen token per attempt (tokens expire during rho retries) and POST the
-    create on the same opener; retry through the known rho_settled_at flap."""
-    status, body = None, None
-    for attempt in range(RHO_MAX_RETRIES):
-        op, tok = _mint(GEN_EMAIL, GEN_PWD, "anmol(gen)")
-        if not tok:
-            time.sleep(8)
-            continue
-        status, body = _call(op, "POST", "/internal/v1/test_data_generation",
-                             token=tok, body={"payload": payload})
-        errs = body.get("errors", []) if isinstance(body, dict) else []
-        if status == 422 and any("rho_settled_at" in str(e) for e in errs):
-            time.sleep(8)
-            continue
-        return status, body
-    return status, body
-
-
 def _ts():
-    return str(int(time.time()))
+    # PID-qualified timestamp: avoid same-second email collisions when the suite
+    # runs across the parallel multi-emulator rig / reruns (each worker is a
+    # distinct process). Mirrors test_auth_account_states_api.py:106.
+    return f"{int(time.time())}.{os.getpid()}"
 
 
 def _funded_user(email, first):
@@ -193,7 +128,7 @@ def _seed_user_with_funding(name=SEED_BANK_NAME, last_4=SEED_LAST_4):
             "attributes": {"user": "@user_1", "funding_source": "@fs_1", "site_name": name},
         },
     }
-    status, body = _create(payload)
+    status, body = gen_create(payload)
     assert status == 200, f"funding-source seed failed: HTTP {status} {body}"
     assert body.get("created", {}).get("fs_1", {}).get("id"), f"no funding_source id: {body}"
     assert body.get("created", {}).get("yms_1", {}).get("id"), f"no yodlee site id: {body}"
@@ -203,9 +138,9 @@ def _seed_user_with_funding(name=SEED_BANK_NAME, last_4=SEED_LAST_4):
 def _get_funding(email):
     """Log in as the seeded user and return the GET /v1/accounts `funding` object — the
     exact JSON the app turns into the destination string. Returns (funding_dict, full)."""
-    op, tok = _mint(email, SEEDED_PWD, "seeded-user")
+    op, tok = mint(email, SEEDED_PWD)
     assert tok, f"GATE: could not log in as seeded user {email}"
-    status, body = _call(op, "GET", "/v1/accounts", token=tok)
+    status, body = call(op, "GET", "/v1/accounts", token=tok)
     assert status == 200, f"/v1/accounts HTTP {status}: {body}"
     funding = body.get("funding") if isinstance(body, dict) else None
     return funding, body

@@ -68,9 +68,10 @@ mutate persistent state: in the enforced branch the 9th is rejected (no row); in
 not-enforced branch the spurious 9th is closed before skip, so the fixture stays at 8.
 
 SHARED HELPER REUSE (de-dupe with jar-six-cap, per the notes):
-  attempt_create_subaccount_blocked(parent_email, pwd, create_path, payload) is the
-  cap helper authored in tests/test_jar_six_cap_enforced.py; this test imports and
-  reuses it for the over-cap create rather than re-implementing it.
+  attempt_create_subaccount_blocked(sess, create_path, payload) is the cap helper
+  authored in tests/test_jar_six_cap_enforced.py; this test imports and reuses it
+  (plus the shared _ParentSession one-token session) for the over-cap create rather
+  than re-implementing it.
 
 Run (no emulator):
   venv/bin/python -m pytest tests/test_kid_eight_cap_enforced.py -v -s -o addopts=""
@@ -79,10 +80,13 @@ import time
 
 import pytest
 
-from utils.genuser_api import SEEDED_PWD, call, mint
+from utils.genuser_api import SEEDED_PWD
 from utils.genuser_fixtures import get_or_create_fixture_user
-# Reuse the shared cap helper authored by the jar-six-cap test (de-dupe, per notes).
-from tests.test_jar_six_cap_enforced import attempt_create_subaccount_blocked
+# Reuse the shared cap helper + one-token parent session authored by the jar-six-cap
+# test (de-dupe, per notes; EFF-02 threads the shared session here too).
+from tests.test_jar_six_cap_enforced import (
+    attempt_create_subaccount_blocked, _ParentSession,
+)
 
 pytestmark = [pytest.mark.value_api, pytest.mark.kids, pytest.mark.edge]
 
@@ -105,14 +109,11 @@ VALID_AVATAR_ID = "boy+1"
 KID_DOB = "2018-01-01"
 
 
-def _fetch_kids(parent_email, pwd):
-    """Log in AS the parent and read its kids list (GET /dependency_users/v1/users).
-    Returns the list of kid dicts (each carries name + current_balance from the
-    dependency_users/user rabl), or None if login / read fails."""
-    op, tok = mint(parent_email, pwd)
-    if not tok:
-        return None
-    status, body = call(op, "GET", KIDS_LIST_PATH, token=tok)
+def _fetch_kids(sess):
+    """Read the parent's kids list (GET /dependency_users/v1/users) over the shared
+    session. Returns the list of kid dicts (each carries name + current_balance from
+    the dependency_users/user rabl), or None if login / read fails."""
+    status, body = sess.call("GET", KIDS_LIST_PATH)
     if status != 200:
         return None
     # users.rabl -> `child @dependency_users => :dependency_users` -> root key.
@@ -137,14 +138,11 @@ def _balances_by_name(kids):
     return out
 
 
-def _close_kid(parent_email, pwd, dependent_user_id):
+def _close_kid(sess, dependent_user_id):
     """Best-effort: close a kid by id (POST .../close) so a spurious 9th created in the
     not-enforced branch does not leave the fixture at 9. Returns the HTTP status."""
-    op, tok = mint(parent_email, pwd)
-    if not tok:
-        return None
-    status, _ = call(op, "POST", KIDS_CLOSE_PATH, token=tok,
-                     body={"dependent_user_id": dependent_user_id})
+    status, _ = sess.call("POST", KIDS_CLOSE_PATH,
+                          body={"dependent_user_id": dependent_user_id})
     return status
 
 
@@ -157,11 +155,14 @@ def test_ninth_kid_blocked_and_eight_unchanged():
     Asserts STATE + the rejection outcome, never a UI affordance/alert string."""
     parent = get_or_create_fixture_user(FIXTURE_KEY)
     parent_email, pwd = parent["email"], parent.get("password", SEEDED_PWD)
+    # EFF-02: one minted parent session threaded through the list reads, the 9th-kid
+    # probe (via the shared helper) and the cleanup close.
+    sess = _ParentSession(parent_email, pwd)
     print(f"  fixture parent {parent_email} (reused={parent.get('reused')}); "
           f"expecting exactly {EXPECTED_CAP} bare kids at the seeded state")
 
     # --- PRE: the parent sits at exactly 8 kids with the seeded names. ---
-    before = _fetch_kids(parent_email, pwd)
+    before = _fetch_kids(sess)
     assert before is not None, (
         f"could not read kids list for parent {parent_email} (login or "
         f"GET {KIDS_LIST_PATH} failed) — cannot establish the cap baseline"
@@ -183,7 +184,7 @@ def test_ninth_kid_blocked_and_eight_unchanged():
     ninth = {"name": f"QA Over Cap Kid {int(time.time())}",
              "date_of_birth": KID_DOB, "avatar_id": VALID_AVATAR_ID}
     status, body = attempt_create_subaccount_blocked(
-        parent_email, pwd, KIDS_CREATE_PATH, ninth)
+        sess, KIDS_CREATE_PATH, ninth)
     print(f"  PROBE: 9th-kid create -> HTTP {status} {str(body)[:200]}")
 
     # --- BRANCH A: DEV did NOT enforce the cap (the documented default). -----------
@@ -195,9 +196,9 @@ def test_ninth_kid_blocked_and_eight_unchanged():
         created_id = None
         if isinstance(body, dict):
             created_id = (body.get("dependency_user") or {}).get("id") or body.get("id")
-        after_create = _fetch_kids(parent_email, pwd)
+        after_create = _fetch_kids(sess)
         observed = len(after_create) if after_create is not None else "unknown"
-        close_status = _close_kid(parent_email, pwd, created_id) if created_id else None
+        close_status = _close_kid(sess, created_id) if created_id else None
         print(f"  CLEANUP: closed spurious 9th kid id={created_id} -> HTTP {close_status}")
         pytest.skip(
             "kid 8-cap NOT enforced on DEV (documented gap, manifest flag #2): the 9th "
@@ -225,7 +226,7 @@ def test_ninth_kid_blocked_and_eight_unchanged():
         f"Response: {str(body)[:240]}"
     )
 
-    after = _fetch_kids(parent_email, pwd)
+    after = _fetch_kids(sess)
     assert after is not None, (
         f"could not re-read kids list for parent {parent_email} after the rejected "
         f"9th create — cannot confirm the eight were left unchanged"

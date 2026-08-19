@@ -8,13 +8,16 @@ sibling jar's value. This is the on-device counterpart to the API-only
 one proves the backend keeps sibling balances distinct; this one proves the APP
 renders the right value in the right named card.
 
-Architecture: a jar is its OWN user (jar_account) under a parent, with its own
-current_balance. To see the jar *cards*, we log into the app AS THE PARENT and open
-the Jars list. We seed a FRESH parent with two sibling jars of DISTINCT amounts (no
-shared fixture provides two named jars under one parent, so this scenario truly needs
-a fresh seed), poll each jar's backend current_balance until it settles to the EXACT
+Architecture: a jar is a sub-account (jar_account) under a parent with NO loginable
+identity of its own — a jar-email /v1/sessions 401s by design, so its balance
+(accumulated_amount) is read through the PARENT's session via jar_balance_by_name.
+To see the jar *cards*, we log into the app AS THE PARENT and open the Jars list.
+We seed a FRESH parent with two sibling jars of DISTINCT amounts (no shared fixture
+provides two named jars under one parent, so this scenario truly needs a fresh seed),
+poll each jar's parent-session backend balance until it settles to the EXACT
 seeded amount (the proven Aggressive + ACH-credit recipe), then assert on-device:
-  - get_jar_balance_by_name(JAR_A) == JAR_A backend current_balance (within band)
+  - get_jar_balance_by_name(JAR_A) == JAR_A backend balance (parent-session read,
+    within band)
   - get_jar_balance_by_name(JAR_A) != get_jar_balance_by_name(JAR_B)   (no sibling leak)
 
 Standalone (own driver; clears app data). DEV API only. Needs emulator + Appium:
@@ -37,20 +40,32 @@ from pages.jars_page import JarsPage
 from utils.deep_links import DeepLinks
 from utils.assertions import parse_money
 from utils.genuser_api import (
-    SEEDED_PWD, gen_create, current_balance, funded_user, ach_credit,
+    SEEDED_PWD, gen_create, jar_balance_by_name, funded_user, ach_credit,
 )
 
 pytestmark = pytest.mark.genuser_e2e
 
 UDID = os.getenv("ANDROID_UDID", "emulator-5554")
 
-# Settled balance lands on the seeded dollar amount; small tolerance for cents/drift.
-BAND = 1.50
+# Jar card balances are MARKET-PRICED (accumulated_amount == the priced value of the
+# jar's holdings), so they settle asynchronously and reprice off the seeded dollar
+# amount. The tolerance is therefore PROPORTIONAL (3% or $5, whichever is larger),
+# the suite's "banded-for-market" convention — mirrors the kid/main value E2Es'
+# _band. A flat tight cents band on a market-priced value is the bug this replaces.
+def _band(expected):
+    return max(5.0, abs(expected) * 0.03)
+
+
+# The two SEEDED sibling amounts are dollars apart by design; this floor only guards
+# that they are genuinely distinct. Kept UNCHANGED (the seeds differ by ~$40): it is
+# the AMT_A-vs-AMT_B distinctness precondition, not a market-value tolerance.
+SEED_DISTINCT_FLOOR = 1.50
 # Distinct, non-round sibling amounts so an accidental positional/leaked read can't
 # coincidentally match the other jar.
 AMT_A = 80.10
 AMT_B = 120.40
-# Settlement is async on the dev backend; poll each jar's own balance until exact.
+# Settlement is async on the dev backend; poll each jar's balance (via the parent
+# session) until exact.
 SETTLE_BUDGET_S = int(os.getenv("SETTLE_BUDGET_S", "480"))
 POLL_INTERVAL_S = int(os.getenv("POLL_INTERVAL_S", "20"))
 
@@ -66,33 +81,35 @@ def _jar_user(parent_ref, email, first, jar_name):
     return u
 
 
-def _poll_balances(targets):
-    """Poll several (sub-)accounts' own current_balance concurrently within ONE shared
-    budget+cadence, until each settles within BAND of its target (then we stop
-    re-querying that one) or the budget runs out. `targets` maps email -> target
-    amount. Returns {email: (best_seen, settled_bool)}.
+def _poll_balances(parent_email, targets):
+    """Poll several jars' balances concurrently through the PARENT's session (jars
+    have no loginable identity — jar_balance_by_name reads accumulated_amount)
+    within ONE shared budget+cadence, until each settles within its per-jar band
+    (_band, proportional) of its target (then we stop re-querying that one) or the
+    budget runs out. `targets` maps
+    jar NAME -> target amount. Returns {name: (best_seen, settled_bool)}.
 
     Both jars are seeded in the same create call and settle in the same async window,
     so polling them in a shared loop — instead of running a full SETTLE_BUDGET_S loop
-    per jar back-to-back — halves the worst-case wait and the login/read volume while
-    keeping the exact per-jar settle criterion (BAND) unchanged."""
-    state = {email: [0.0, False] for email in targets}
+    per jar back-to-back — halves the worst-case wait and the read volume while
+    keeping the exact per-jar settle criterion (_band) unchanged."""
+    state = {name: [0.0, False] for name in targets}
     waited = 0
     while waited <= SETTLE_BUDGET_S and not all(s[1] for s in state.values()):
-        for email, target in targets.items():
-            if state[email][1]:
+        for name, target in targets.items():
+            if state[name][1]:
                 continue
-            bal = current_balance(email, SEEDED_PWD)
+            bal = jar_balance_by_name(parent_email, name, SEEDED_PWD)
             if bal is not None:
-                state[email][0] = max(state[email][0], bal)
-                print(f"  [poll {email} +{waited}s] current_balance={bal}")
-                if abs(bal - target) <= BAND:
-                    state[email][1] = True
+                state[name][0] = max(state[name][0], bal)
+                print(f"  [poll {name!r} +{waited}s] parent-session jar balance={bal}")
+                if abs(bal - target) <= _band(target):
+                    state[name][1] = True
         if all(s[1] for s in state.values()):
             break
         time.sleep(POLL_INTERVAL_S)
         waited += POLL_INTERVAL_S
-    return {email: (best, settled) for email, (best, settled) in state.items()}
+    return {name: (best, settled) for name, (best, settled) in state.items()}
 
 
 def _seed_parent_with_two_jars():
@@ -121,15 +138,15 @@ def _seed_parent_with_two_jars():
           f"A {created['jar_a']['id']} (${AMT_A}, {jar_a_name!r}) and "
           f"B {created['jar_b']['id']} (${AMT_B}, {jar_b_name!r})")
 
-    results = _poll_balances({jar_a_email: AMT_A, jar_b_email: AMT_B})
-    bal_a, settled_a = results[jar_a_email]
-    bal_b, settled_b = results[jar_b_email]
+    results = _poll_balances(parent_email, {jar_a_name: AMT_A, jar_b_name: AMT_B})
+    bal_a, settled_a = results[jar_a_name]
+    bal_b, settled_b = results[jar_b_name]
     if not (settled_a and settled_b):
         pytest.fail(f"jar balances never settled (A ${bal_a}/${AMT_A} settled={settled_a}; "
                     f"B ${bal_b}/${AMT_B} settled={settled_b})")
     # Sanity: the two seeded amounts must actually be distinct, else the sibling-leak
     # half of the oracle is vacuous.
-    assert abs(bal_a - bal_b) > BAND, f"seeded sibling balances not distinct: A ${bal_a}, B ${bal_b}"
+    assert abs(bal_a - bal_b) > SEED_DISTINCT_FLOOR, f"seeded sibling balances not distinct: A ${bal_a}, B ${bal_b}"
     return parent_email, jar_a_name, bal_a, jar_b_name, bal_b
 
 
@@ -206,8 +223,13 @@ def test_jar_card_value_matches_seeded_balance():
     parent_email, jar_a, bal_a, jar_b, bal_b = _seed_parent_with_two_jars()
     print(f"  backend settled: {jar_a!r}=${bal_a}, {jar_b!r}=${bal_b}")
 
-    opts = get_android_options(no_reset=False)  # fresh app data
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data
     opts.udid = UDID
+    # Disable the MJPEG screenshot broadcaster on this test-owned secondary session:
+    # a 2nd broadcaster on the 2GB emulator is the documented OOM tipping point
+    # (matches test_allocation_jars_kids_e2e). Failure screenshots are unaffected —
+    # conftest _grab uses the W3C get_screenshot_as_png path, not MJPEG.
+    opts.set_capability("mjpegServerPort", 0)
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:
         _login_as_parent(d, parent_email, SEEDED_PWD)
@@ -223,17 +245,20 @@ def test_jar_card_value_matches_seeded_balance():
         card_a = parse_money(raw_a)
         card_b = parse_money(raw_b)
 
-        # Oracle 1: the named card == that jar's backend current_balance (within band).
-        assert card_a == pytest.approx(bal_a, abs=BAND), \
+        # Oracle 1: the named card == that jar's backend balance (parent-session
+        # read of accumulated_amount), within band.
+        assert card_a == pytest.approx(bal_a, abs=_band(bal_a)), \
             f"jar A card ${card_a} should match backend ${bal_a} for {jar_a!r}"
 
         # Oracle 2: the name-scoped getter does NOT return the sibling's value.
-        assert card_a != pytest.approx(card_b, abs=BAND), \
+        # (A wider band here only makes the "not within band of the sibling" check
+        # HARDER to satisfy — equal-or-stronger, never weaker.)
+        assert card_a != pytest.approx(card_b, abs=_band(card_b)), \
             (f"name-scoped getter leaked a sibling value: {jar_a!r}->${card_a} == "
              f"{jar_b!r}->${card_b} (expected distinct ${bal_a} vs ${bal_b})")
         # And jar B's card matches ITS own backend balance, confirming the read is
         # scoped per-jar rather than both cards reading the same number.
-        assert card_b == pytest.approx(bal_b, abs=BAND), \
+        assert card_b == pytest.approx(bal_b, abs=_band(bal_b)), \
             f"jar B card ${card_b} should match backend ${bal_b} for {jar_b!r}"
 
         print(f"  PASS: {jar_a!r} card ${card_a} == backend ${bal_a}; "

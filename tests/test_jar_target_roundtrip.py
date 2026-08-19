@@ -63,7 +63,7 @@ from pages.home_page import HomePage
 from pages.jars_page import JarsPage
 from utils.deep_links import DeepLinks
 from utils.assertions import parse_money, is_money
-from utils.genuser_api import SEEDED_PWD, mint, call, can_login
+from utils.genuser_api import SEEDED_PWD, mint, call
 from utils.genuser_fixtures import get_or_create_fixture_user, mark_onboarded
 
 pytestmark = [pytest.mark.genuser_e2e, pytest.mark.jars]
@@ -223,11 +223,10 @@ def test_jar_goal_roundtrips_exactly_backend():
     parent_email, pwd = parent["email"], parent.get("password", SEEDED_PWD)
     print(f"  fixture parent {parent_email} (reused={parent.get('reused')}); jar {JAR_NAME!r}")
 
-    assert can_login(parent_email, pwd), (
-        f"fixture parent {parent_email} could not log in — fixture not provisioned; "
-        f"cannot read the jar goal back"
-    )
-
+    # NB: no separate can_login() gate here — _read_jar_goal_via_api mints its own
+    # session and returns None on any login failure, so the `goal is not None`
+    # assertion below already covers the un-provisioned / can't-log-in case (the
+    # gate was duplicated; EFF-03). The value/goal oracle is unchanged.
     goal, accumulated = _read_jar_goal_via_api(parent_email, pwd, JAR_NAME)
     assert goal is not None, (
         f"could not read saving_amount for jar {JAR_NAME!r} from GET /jars/v1/users "
@@ -270,8 +269,13 @@ def test_jar_goal_roundtrips_exactly_on_device():
         f"before trusting the on-device read"
     )
 
-    opts = get_android_options(no_reset=False)  # fresh app data for a clean login
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data for a clean login
     opts.udid = UDID
+    # Disable the MJPEG screenshot broadcaster on this test-owned secondary session:
+    # a 2nd broadcaster on the 2GB emulator is the documented OOM tipping point
+    # (matches test_allocation_jars_kids_e2e). Failure screenshots are unaffected —
+    # conftest _grab uses the W3C get_screenshot_as_png path, not MJPEG.
+    opts.set_capability("mjpegServerPort", 0)
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:
         try:

@@ -25,11 +25,14 @@ WHY API-LAYER (no device, deterministic):
   `abstract val balance: Double` — i.e. the headline figure on each account's
   Performance tab IS that account's balance, and the carousel shows Main and
   each sub-account side by side with DISTINCT balances.
-  Every Raiz Kid and Jar is its own backend User (a `dependent` / `jar`
-  sub-User hanging off the parent) with its own holdings + login, so its
-  Performance headline is fed by its OWN `current_balance`. Reading
-  `GET /v1/user -> current_balance` from each entity's session reconciles the
-  SAME number the device would render in that account's Performance tile,
+  Every Raiz Kid and Jar is its own backend sub-User (`dependent` / `jar`)
+  hanging off the parent with its own holdings, but their SESSIONS differ:
+  kids CAN log in (fixtures set kid_account_data.account_access), so a kid's
+  headline is read as `GET /v1/user -> current_balance` from the KID's own
+  session; jars have NO loginable identity (a jar-email /v1/sessions 401s by
+  design), so a jar's headline balance (accumulated_amount) is read through
+  the PARENT's session via `jar_balance_by_name`. Either way this reconciles
+  the SAME number the device would render in that account's Performance tile,
   with no Appium/market-drift flakiness — exactly what "API-layer first" asks.
 
   Graph range pills (`PerformanceMainChartTabs.kt`), change-in-value and
@@ -38,8 +41,8 @@ WHY API-LAYER (no device, deterministic):
 
 ORACLE this test enforces:
   For BOTH the jars fixture and the kids fixture, per parent:
-    (1) Each sub-account's Performance headline (== its backend current_balance)
-        is read live from that sub-account's OWN session.
+    (1) Each sub-account's Performance headline (== its backend balance) is
+        read live — kids from their OWN session, jars via the PARENT session.
     (2) Each sub-account headline  !=  the Main (parent) headline, beyond band
         — the per-account tab does NOT just echo Main.
     (3) The two siblings differ from EACH OTHER beyond band — the headline is
@@ -50,7 +53,8 @@ ORACLE this test enforces:
   No graph / return / Δ assertion anywhere.
 
 FIXTURES (existing, per the provision manifest):
-  `jars_siblings_distinct` — parent + two named jars at a.<email>/b.<email>,
+  `jars_siblings_distinct` — parent + two named jars (JAR_A_NAME / JAR_B_NAME,
+    read by name via the parent session — jar sub-account emails cannot log in),
     seeded ACH balances JAR_A_BALANCE / JAR_B_BALANCE.
   `kids_siblings_distinct` — parent + two kids at a.<email>/b.<email>,
     seeded ACH balances KID_A_BALANCE / KID_B_BALANCE.
@@ -64,9 +68,10 @@ import time
 
 import pytest
 
-from utils.genuser_api import current_balance
+from utils.genuser_api import current_balance, jar_users
 from utils.genuser_fixtures import (
     get_or_create_fixture_user,
+    JAR_A_NAME, JAR_B_NAME,
     JAR_A_BALANCE, JAR_B_BALANCE,
     KID_A_BALANCE, KID_B_BALANCE,
 )
@@ -93,22 +98,24 @@ RECON_FLOOR = 1.50    # absolute floor (cents rounding on small seeds)
 DISTINCT_MARGIN = 5.00
 
 
-def _headline(label, email):
-    """The per-account Performance-tab headline == that account's backend
-    current_balance, read from the account's OWN session. (Balance ONLY — no
+def _headline(label, read, source):
+    """The per-account Performance-tab headline balance, read via `read()`:
+    Main and kids from that account's OWN session (kids can log in); jars
+    through the PARENT's session (jars have no loginable identity — the jar's
+    accumulated_amount IS its headline balance). (Balance ONLY — no
     graph/return/Δ; gen users have no price history.)
 
     Retries once on a transient None (a /v1/sessions rate-limit can exhaust the
-    mint budget and return no token), so a recoverable login flap does not fail
+    mint budget and return no token), so a recoverable read flap does not fail
     the value oracle."""
-    bal = current_balance(email)
+    bal = read()
     if bal is None:
         time.sleep(8)
-        bal = current_balance(email)
+        bal = read()
     assert bal is not None, (
-        f"{label}: could not read current_balance (the Performance-tab headline "
-        f"source) for {email} — login/endpoint failure")
-    print(f"  {label} {email[:30]}: Performance headline = ${bal:.2f}")
+        f"{label}: could not read the Performance-tab headline balance via "
+        f"{source} — session/endpoint failure")
+    print(f"  {label} [{source}]: Performance headline = ${bal:.2f}")
     return bal
 
 
@@ -118,17 +125,19 @@ def _recon_band(seed):
     return max(RECON_FLOOR, RECON_PCT * seed)
 
 
-def _assert_per_account_performance(kind, parent_email,
-                                    a_seed, b_seed):
+def _assert_per_account_performance(kind, parent_email, a_seed, b_seed,
+                                    read_a, read_b, a_src, b_src):
     """Shared body for both jars and kids: each sibling's Performance headline
     reconciles to its seeded balance, differs from Main, and differs from its
-    sibling. Returns (main, a, b) balances."""
-    a_email = "a." + parent_email
-    b_email = "b." + parent_email
-
-    main = _headline(f"{kind}-Main(parent)", parent_email)
-    a = _headline(f"{kind}-A", a_email)
-    b = _headline(f"{kind}-B", b_email)
+    sibling. `read_a`/`read_b` are zero-arg callables returning that sibling's
+    headline balance (kids: own-session current_balance; jars: parent-session
+    jar_balance_by_name), with `a_src`/`b_src` describing the read for failure
+    messages. Returns (main, a, b) balances."""
+    main = _headline(f"{kind}-Main(parent)",
+                     lambda: current_balance(parent_email),
+                     f"own session {parent_email[:30]}")
+    a = _headline(f"{kind}-A", read_a, a_src)
+    b = _headline(f"{kind}-B", read_b, b_src)
 
     # (4) reconcile each sub-account headline to its KNOWN seeded ACH balance,
     # within a repricing-aware proportional band (see _recon_band / RECON_PCT).
@@ -168,8 +177,27 @@ def test_jar_performance_tab_headline_differs_from_main_and_reconciles():
     print(f"  fixture '{fx['key']}' parent={parent_email} "
           f"(reused={fx.get('reused')})")
 
+    # Jars have no loginable identity — read each NAMED jar's balance through the
+    # PARENT's session. EFF-02: fetch the parent's jar list ONCE and index by name
+    # (instead of two jar_balance_by_name calls, each its own parent login + jars
+    # GET). The cached map re-fetches only while it holds nothing, so _headline's
+    # retry still recovers a transient empty read without extra logins on success.
+    _jar_bal = {}
+
+    def _jar_map():
+        if not _jar_bal:
+            for j in (jar_users(parent_email) or []):
+                if isinstance(j, dict) and j.get("name") is not None \
+                        and j.get("accumulated_amount") is not None:
+                    _jar_bal[j["name"]] = float(j["accumulated_amount"])
+        return _jar_bal
+
     main, a, b = _assert_per_account_performance(
-        "Jar", parent_email, JAR_A_BALANCE, JAR_B_BALANCE)
+        "Jar", parent_email, JAR_A_BALANCE, JAR_B_BALANCE,
+        read_a=lambda: _jar_map().get(JAR_A_NAME),
+        read_b=lambda: _jar_map().get(JAR_B_NAME),
+        a_src=f"parent-session jars read, name={JAR_A_NAME!r}",
+        b_src=f"parent-session jars read, name={JAR_B_NAME!r}")
 
     print(f"  PASS: Jar Performance headlines A=${a:.2f} B=${b:.2f} both differ "
           f"from Main=${main:.2f} and from each other, and each reconciles to "
@@ -184,8 +212,16 @@ def test_kid_performance_tab_headline_differs_from_main_and_reconciles():
     print(f"  fixture '{fx['key']}' parent={parent_email} "
           f"(reused={fx.get('reused')})")
 
+    # Kids CAN log in (kid_account_data.account_access) — read each kid's
+    # headline from the kid's OWN session, unchanged.
+    a_email = "a." + parent_email
+    b_email = "b." + parent_email
     main, a, b = _assert_per_account_performance(
-        "Kid", parent_email, KID_A_BALANCE, KID_B_BALANCE)
+        "Kid", parent_email, KID_A_BALANCE, KID_B_BALANCE,
+        read_a=lambda: current_balance(a_email),
+        read_b=lambda: current_balance(b_email),
+        a_src=f"kid's own session {a_email[:32]}",
+        b_src=f"kid's own session {b_email[:32]}")
 
     print(f"  PASS: Kid Performance headlines A=${a:.2f} B=${b:.2f} both differ "
           f"from Main=${main:.2f} and from each other, and each reconciles to "

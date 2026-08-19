@@ -10,10 +10,19 @@ where RAIZ-9909 ("Save button obstructed and small") lived:
      the SAME logged-in user (within a small reconciliation band) — not just that a
      dollar amount is present. This targets the suite's presence-vs-value weakness.
 
-  2. LAYOUT (RAIZ-9909): after opening 'Set Recurring Investment', the Save button
-     must render at a usable tap-target size. RecurringPage.is_save_button_well_rendered()
+  2. LAYOUT (RAIZ-9909): after opening the recurring form, the Save button must
+     render at a usable tap-target size. RecurringPage.is_save_button_well_rendered()
      measures the button's bounds and requires it be displayed and large enough — a
      presence check would sail straight past the "obstructed and small" defect.
+
+STATE-AGNOSTIC NAVIGATION (shared-fixture coupling, learned the hard way): the
+overview card renders 'Set Recurring Investment' only in EMPTY state; once any run
+persists a recurring (test_recurring_create_roundtrip sets a $25 Weekly one on this
+same fixture — its whole point), the card renders 'Edit Recurring Investment'
+instead, forever (backend state; app-data resets don't clear it). Both CTAs route
+to the SAME amount + Frequency + Save form (RecurringOverviewScreen.kt ->
+onEditRecurringClick, build 3252), so both oracles are reachable from either state
+and the navigation keys on Set-OR-Edit, never on Set alone.
 
 Reuse strategy: the long-lived `presence_funded` fixture — an onboarded generated
 user with an immediate (priced) Aggressive main-portfolio balance — so no fresh user
@@ -88,22 +97,31 @@ def _login_and_home(d, fx):
 
 def _open_recurring_main_setup(d, rec: RecurringPage):
     """Open the Recurring investments list (deep link) and tap the MAIN PORTFOLIO
-    row to land on the setup screen that shows 'Current balance: $X'."""
+    row to land on the overview/setup screen that shows 'Current balance: $X' —
+    in EITHER empty ('Set ...') or set ('Edit ...') state."""
     DeepLinks.open(d, DeepLinks.RECURRING_INVESTMENTS)
     assert rec.is_loaded(timeout=20), "Recurring investments list did not load"
     # A promo/coachmark can land over the list on a slow emulator — clear it
     # before we try to tap the portfolio row.
     rec.dismiss_modal()
-    rec.open_main_portfolio()
-    assert rec.is_setup_screen(timeout=20), \
-        "did not reach the main-portfolio recurring setup screen"
+    # open_main_portfolio polls the row past the list's shimmer state, taps the
+    # clickable container, and confirms the overview painted (re-tapping a
+    # swallowed tap) — a bare first-match click was a flake source here.
+    assert rec.open_main_portfolio(), (
+        "did not reach the main-portfolio recurring overview/setup screen "
+        "(main row never resolved past the list shimmer, or the tap was swallowed)"
+    )
+    assert rec.is_setup_screen(timeout=20), (
+        "did not reach the main-portfolio recurring setup screen "
+        "(neither 'Set' nor 'Edit Recurring Investment' CTA rendered)"
+    )
 
 
 def test_current_balance_matches_and_save_button_rendered():
     """The Recurring main-portfolio setup screen renders 'Current balance: $X' equal
     to the backend current_balance for the logged-in user (within band), and the Save
-    button on the 'Set Recurring Investment' form is rendered at a usable size
-    (RAIZ-9909)."""
+    button on the recurring form (opened via the Set OR Edit CTA, whichever the
+    account state shows) is rendered at a usable size (RAIZ-9909)."""
     fx = get_or_create_fixture_user("presence_funded")
 
     # Backend truth for the SAME user we log in as.
@@ -111,7 +129,7 @@ def test_current_balance_matches_and_save_button_rendered():
     assert backend is not None, f"could not read backend current_balance for {fx['email']}"
     assert backend > 0, f"fixture user has a non-positive backend balance: ${backend}"
 
-    opts = get_android_options(no_reset=False)  # fresh app data
+    opts = get_android_options(no_reset=False, secondary=True)  # fresh app data
     opts.udid = UDID
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     try:
@@ -139,9 +157,12 @@ def test_current_balance_matches_and_save_button_rendered():
         print(f"  PASS oracle 1: balance matches backend within ${band:.2f} (|delta|=${delta:.2f})")
 
         # --- Oracle 2: Save button well-rendered on the recurring form (RAIZ-9909) -
-        rec.open_set_recurring_investment()
+        # Opens via whichever CTA is present (Set in empty state / Edit in set
+        # state — same destination form) and confirms the form painted.
+        assert rec.open_set_recurring_investment(), \
+            "tapping the Set/Edit Recurring Investment CTA did not open the recurring form"
         assert rec.is_recurring_form(timeout=20), \
-            "did not reach the 'Set Recurring Investment' form (amount + Frequency + Save)"
+            "did not reach the recurring form (amount + Frequency + Save)"
 
         assert rec.is_save_button_well_rendered(), (
             "Save button is not rendered at a usable tap-target size — "

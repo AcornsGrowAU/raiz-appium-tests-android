@@ -24,10 +24,55 @@ from pages.home_page import HomePage
 @pytest.fixture
 def fresh_driver():
     """Force-stops the app and starts a fresh session (noReset=False)."""
-    opts = get_android_options(no_reset=False) if PLATFORM == "android" else get_ios_options(no_reset=False)
+    opts = get_android_options(no_reset=False, secondary=True) if PLATFORM == "android" else get_ios_options(no_reset=False)
     d = appium_webdriver.Remote(command_executor=APPIUM_HOST, options=opts)
     yield d
     d.quit()
+
+
+# A relaunch goes splash -> PIN; on a slow/pressured or back-to-back restart the
+# PIN title can render well after the default 10s. Give the restart assertion room.
+PIN_RESTART_WAIT = 20
+
+
+def _relaunch_app(driver, attempts=3) -> PinPage:
+    """Cold-restart the authenticated app and return its PIN screen.
+
+    Two hardenings against the intermittent 'PIN screen should appear on app
+    restart' flake, neither of which touches the oracle (PIN must still appear):
+
+    1. Un-raced relaunch: fully terminate and WAIT for the app to actually leave
+       the running state before reactivating. Back-to-back restarts otherwise race
+       (activate_app fires while the process is still tearing down).
+    2. Reopen-retry: an occasional cold relaunch just fails to render the Compose
+       PIN screen (empirically ~1 in a class of 6 consecutive restarts, even with a
+       20s wait). Rather than wait ever-longer on ONE bad relaunch, re-terminate
+       and relaunch — mirrors the reopen-retry the deep-link/heavy-screen fixtures
+       already use. Returns as soon as the PIN title is up; the caller's
+       is_loaded(timeout=PIN_RESTART_WAIT) assert still fails loudly if all
+       attempts genuinely never surface PIN."""
+    import time as _time
+    from config.settings import POLL_INTERVAL
+    pin = PinPage(driver)
+    for attempt in range(attempts):
+        driver.terminate_app(ANDROID_APP_PACKAGE)
+        # Poll until the app is no longer running (state <= 1) before reactivating.
+        waited = 0.0
+        while waited < 5.0:
+            try:
+                if driver.query_app_state(ANDROID_APP_PACKAGE) <= 1:
+                    break
+            except Exception:
+                break
+            _time.sleep(POLL_INTERVAL)
+            waited += POLL_INTERVAL
+        driver.activate_app(ANDROID_APP_PACKAGE)
+        # First attempts poll briefly; the last attempt gets the full budget so the
+        # caller's assert reflects a genuinely-stuck relaunch, not an early give-up.
+        probe = PIN_RESTART_WAIT if attempt == attempts - 1 else 8
+        if pin.is_loaded(timeout=probe):
+            return pin
+    return pin
 
 
 def _open_login(driver) -> LoginPage:
@@ -76,6 +121,56 @@ def _unlock_to_home(driver, pin: PinPage) -> HomePage:
         _ensure_logged_in(driver)
         home = HomePage(driver)
     return home
+
+
+def _became_invisible(driver, locator, timeout=DEFAULT_WAIT) -> bool:
+    """Positive transition wait: True once `locator` has actually left the screen
+    (invisible or absent), False if it's still present after `timeout`.
+
+    Preferred over `not is_visible(...)`: that snapshot passes if the element
+    merely isn't visible at the instant it's read, so it can report navigation
+    BEFORE the transition even begins. This waits for the disappearance to
+    complete, asserting the navigation actually happened. Mirrors base_page's
+    WebDriverWait/EC usage."""
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    from config.settings import POLL_INTERVAL
+    try:
+        return bool(WebDriverWait(driver, timeout, poll_frequency=POLL_INTERVAL).until(
+            EC.invisibility_of_element_located(locator)))
+    except TimeoutException:
+        return False
+
+
+def _parse_bounds(el):
+    """Parse an element's @bounds into (x1, y1, x2, y2), or None."""
+    import re
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", el.get_attribute("bounds") or "")
+    return tuple(int(m.group(i)) for i in (1, 2, 3, 4)) if m else None
+
+
+def _password_toggle_is_real(login) -> bool:
+    """Prove the show/hide control the test taps is a GENUINE password toggle
+    before trusting a reveal/hide reading.
+
+    True when the content-desc-labelled eye is present (Compose-correct), OR when
+    the positional (//Button)[2] fallback sits INSIDE the password field's bounds
+    (a real in-field trailing eye). A chrome Button elsewhere on the form must NOT
+    be able to masquerade as the toggle via the positional fallback."""
+    if login.is_present(login.SHOW_PASSWORD_BUTTON, timeout=STATE_PROBE_WAIT):
+        return True
+    fields = login.driver.find_elements(*login.PASSWORD_FIELD)
+    btns = login.driver.find_elements(*login.SHOW_PASSWORD_BUTTON_FALLBACK)
+    if not fields or not btns:
+        return False
+    fb = _parse_bounds(fields[0])
+    bb = _parse_bounds(btns[0])
+    if not fb or not bb:
+        return False
+    # The fallback button's centre must fall within the password field rectangle.
+    cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+    return fb[0] <= cx <= fb[2] and fb[1] <= cy <= fb[3]
 
 
 @pytest.mark.auth
@@ -146,7 +241,7 @@ class TestLogin:
         login = LoginPage(fresh_driver)
         assert login.is_loaded()
         login.tap_forgot_password()
-        assert not login.is_visible(login.TITLE, timeout=3), \
+        assert _became_invisible(fresh_driver, login.TITLE, timeout=DEFAULT_WAIT), \
             "Tapping 'Forgot your password?' should navigate to the password-reset flow"
 
 
@@ -250,6 +345,12 @@ class TestPasswordVisibility:
         Asserts an actual state change, not just that a control exists."""
         login = _open_login(fresh_driver)
         login.enter_password(TEST_PASSWORD)
+        # Before trusting a reveal/hide reading, prove the control we tap is a REAL
+        # password toggle — not a chrome button the positional (//Button)[2]
+        # fallback could tap and let masquerade as a toggle.
+        assert _password_toggle_is_real(login), \
+            "Show/hide control must be a genuine password toggle (content-desc eye, " \
+            "or a clickable node inside the password field), not a chrome button"
         login.tap_show_password()
         revealed = login.get_password_value()
         login.tap_show_password()
@@ -271,7 +372,7 @@ class TestForgotPassword:
         asserts we left 'Log in to Raiz' and that an email input is present."""
         login = _open_login(fresh_driver)
         login.tap_forgot_password()
-        assert not login.is_visible(login.TITLE, timeout=STATE_PROBE_WAIT), \
+        assert _became_invisible(fresh_driver, login.TITLE, timeout=DEFAULT_WAIT), \
             "Forgot-password should navigate away from the login form"
         # The reset screen collects an email; the same field locator works if the
         # screen reuses the 'Email address' label. WATCH: reset-screen copy not
@@ -287,7 +388,7 @@ class TestForgotPassword:
         the app recoverable."""
         login = _open_login(fresh_driver)
         login.tap_forgot_password()
-        assert not login.is_visible(login.TITLE, timeout=STATE_PROBE_WAIT)
+        assert _became_invisible(fresh_driver, login.TITLE, timeout=DEFAULT_WAIT)
         login.go_back()
         assert login.is_loaded(), "Back from reset flow should return to the login form"
 
@@ -296,33 +397,25 @@ class TestForgotPassword:
 class TestPin:
     def test_pin_screen_appears_on_app_restart(self, driver):
         """After a session is established, restarting the app should show the PIN screen."""
-        driver.terminate_app("com.acornsau.android.development")
-        driver.activate_app("com.acornsau.android.development")
-        pin = PinPage(driver)
-        assert pin.is_loaded(), "PIN screen should appear on app restart"
+        pin = _relaunch_app(driver)
+        assert pin.is_loaded(timeout=PIN_RESTART_WAIT), "PIN screen should appear on app restart"
 
     def test_correct_pin_navigates_home(self, driver):
-        driver.terminate_app(ANDROID_APP_PACKAGE)
-        driver.activate_app(ANDROID_APP_PACKAGE)
-        pin = PinPage(driver)
-        assert pin.is_loaded(), "PIN screen should appear on app restart"
+        pin = _relaunch_app(driver)
+        assert pin.is_loaded(timeout=PIN_RESTART_WAIT), "PIN screen should appear on app restart"
         home = _unlock_to_home(driver, pin)
         assert home.is_loaded(), "Correct PIN should navigate to Home"
 
     def test_log_out_from_pin_screen(self, driver):
-        driver.terminate_app("com.acornsau.android.development")
-        driver.activate_app("com.acornsau.android.development")
-        pin = PinPage(driver)
-        assert pin.is_loaded()
+        pin = _relaunch_app(driver)
+        assert pin.is_loaded(timeout=PIN_RESTART_WAIT)
         pin.tap_log_out()
         splash = SplashPage(driver)
         assert splash.is_loaded(), "Tapping Log Out on PIN screen should return to Splash"
 
     def _restart_to_pin(self, driver) -> PinPage:
-        driver.terminate_app(ANDROID_APP_PACKAGE)
-        driver.activate_app(ANDROID_APP_PACKAGE)
-        pin = PinPage(driver)
-        assert pin.is_loaded(), "PIN screen should appear on app restart"
+        pin = _relaunch_app(driver)
+        assert pin.is_loaded(timeout=PIN_RESTART_WAIT), "PIN screen should appear on app restart"
         return pin
 
     def test_wrong_pin_does_not_navigate_home(self, driver):
@@ -394,12 +487,11 @@ class TestSessionPersistence:
     must NOT reappear."""
 
     def test_relaunch_resumes_at_pin_not_full_login(self, driver):
-        driver.terminate_app(ANDROID_APP_PACKAGE)
-        driver.activate_app(ANDROID_APP_PACKAGE)
-        pin = PinPage(driver)
+        pin = _relaunch_app(driver)
         login = LoginPage(driver)
         splash = SplashPage(driver)
-        assert pin.is_loaded(), "Relaunch of an authenticated app should show the PIN screen"
+        assert pin.is_loaded(timeout=PIN_RESTART_WAIT), \
+            "Relaunch of an authenticated app should show the PIN screen"
         assert not splash.is_present_now(splash.TAGLINE), \
             "Relaunch must NOT drop to the splash/login form when a session exists"
         assert not login.is_present(login.TITLE, timeout=STATE_PROBE_WAIT), \

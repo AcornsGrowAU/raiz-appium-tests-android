@@ -37,6 +37,66 @@ from config.settings import STATE_PROBE_WAIT, DEFAULT_WAIT, ANDROID_APP_PACKAGE
 from conftest import _open_deep_link
 
 
+def _became_invisible(driver, locator, timeout=DEFAULT_WAIT) -> bool:
+    """Positive transition wait: True once `locator` has actually left the screen
+    (invisible or absent), False if it's still present after `timeout`.
+
+    Preferred over `not is_visible(...)`: that snapshot passes if the element
+    merely isn't visible at the instant it's read, so it can report "left" BEFORE
+    a screen transition even begins. This waits for the disappearance transition to
+    complete, so it asserts the navigation actually happened. Mirrors base_page's
+    WebDriverWait/EC usage."""
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
+    from config.settings import POLL_INTERVAL
+    try:
+        return bool(WebDriverWait(driver, timeout, poll_frequency=POLL_INTERVAL).until(
+            EC.invisibility_of_element_located(locator)))
+    except TimeoutException:
+        return False
+
+
+def _toggle_key(el):
+    """A stable identity key (attr, value) for a preference toggle so the SAME
+    toggle can be re-resolved after a Compose re-render — never trusting a
+    positional index a re-render can reorder. Prefer resource-id / content-desc;
+    fall back to @bounds, which is fixed for a toggle regardless of its on/off
+    state. The Compose default 'null' content-desc artifact is ignored."""
+    for attr in ("resource-id", "content-desc"):
+        try:
+            v = el.get_attribute(attr)
+        except Exception:
+            v = None
+        if v and v.strip() and v.strip().lower() != "null":
+            return (attr, v.strip())
+    try:
+        b = el.get_attribute("bounds")
+    except Exception:
+        b = None
+    return ("bounds", b) if b else None
+
+
+def _resolve_toggle(settings, key, fallback_index=0):
+    """Re-resolve the SAME toggle identified by `key` among the current real
+    toggles. Falls back to the positional toggle only if the key can't be
+    re-matched (e.g. bounds shifted on re-render), so restore/verify never regress
+    below the original positional behaviour."""
+    toggles = settings.get_real_toggles()
+    if key:
+        attr, want = key
+        for el in toggles:
+            try:
+                got = el.get_attribute(attr)
+            except Exception:
+                continue
+            if got and got.strip() == want:
+                return el
+    if toggles and 0 <= fallback_index < len(toggles):
+        return toggles[fallback_index]
+    return None
+
+
 def _restore_clean_home(driver):
     """Drive the app back to a confirmed, settled Home so a following fixture
     (e.g. the `settings` fixture, which does home -> tap_settings) starts from a
@@ -160,7 +220,7 @@ class TestSettingsBackNavigationExtraE2E:
     def test_back_from_sub_menu_returns_to_settings(self, settings, driver, label, locator):
         assert settings.is_loaded(), "Precondition: Settings should be open"
         settings._tap_item(label, locator)
-        left = not settings.is_visible(settings.TITLE, timeout=STATE_PROBE_WAIT)
+        left = _became_invisible(driver, settings.TITLE, timeout=DEFAULT_WAIT)
         assert left, f"Tapping '{label}' should open its own screen"
         driver.back()
         assert settings.is_visible(settings.TITLE), \
@@ -312,23 +372,34 @@ class TestNotificationPreferences:
         switches = settings.get_real_toggles()
         if not switches:
             pytest.skip("No notification toggles rendered on this build")
-        before = settings.switch_state(switches[0])
-        switches[0].click()
+        # Pin the chosen toggle by a STABLE key (resource-id/content-desc/bounds)
+        # so restore/verify re-resolve the SAME element — a positional [0] can be
+        # reordered by a Compose re-render between reads, restoring the wrong row.
+        target = switches[0]
+        key = _toggle_key(target)
+        before = settings.switch_state(target)
+        target.click()
         # The custom Compose toggle updates its @checked a beat after the tap, so
-        # poll the same positional toggle rather than reading once immediately.
+        # poll the SAME toggle (re-resolved by key) rather than reading once.
         after = before
         for _ in range(10):
             time.sleep(0.3)
-            cur = settings.get_real_toggles()
-            if cur:
-                after = settings.switch_state(cur[0])
+            cur = _resolve_toggle(settings, key)
+            if cur is not None:
+                after = settings.switch_state(cur)
                 if after != before:
                     break
-        # Restore regardless of assertion outcome so we never leave a flipped pref.
+        # Restore the SAME toggle and poll-confirm the state actually returned to
+        # `before`, so we never leave a flipped preference on the shared account.
         if after != before:
-            cur = settings.get_real_toggles()
-            if cur:
-                cur[0].click()
+            cur = _resolve_toggle(settings, key)
+            if cur is not None:
+                cur.click()
+                for _ in range(10):
+                    time.sleep(0.3)
+                    restored = _resolve_toggle(settings, key)
+                    if restored is not None and settings.switch_state(restored) == before:
+                        break
         assert after != before, "Tapping a notification toggle must change its on/off state"
 
 
@@ -343,8 +414,21 @@ _PLACEHOLDERS = ("null", "undefined", "{", "}", "%s", "NaN", "None", "[object")
 
 
 def _visible_texts(driver):
-    return [el.text for el in driver.find_elements(AppiumBy.XPATH, "//android.widget.TextView")
-            if (el.text or "").strip()]
+    """Every non-empty TextView string currently rendered. Each read is guarded
+    against StaleElementReferenceException (mirrors SettingsPage.value_texts) — the
+    Compose profile surface re-renders as it hydrates, so an element captured by
+    find_elements can go stale before its .text is read and take the whole scrape
+    down with it."""
+    from selenium.common.exceptions import StaleElementReferenceException
+    out = []
+    for el in driver.find_elements(AppiumBy.XPATH, "//android.widget.TextView"):
+        try:
+            t = el.text
+        except StaleElementReferenceException:
+            continue
+        if (t or "").strip():
+            out.append(t)
+    return out
 
 
 @pytest.mark.settings
@@ -369,7 +453,18 @@ class TestProfileContentCorrectness:
         """The personal profile should surface a well-formed email address (the
         account identity), not a blank or a label with no value. WATCH."""
         _open_deep_link(driver, DeepLinks.PROFILE_PERSONAL)
-        texts = " \n".join(_visible_texts(driver))
+        page = SettingsPage(driver)
+        # Wait for the personal/profile surface before scraping — the field values
+        # hydrate after the deep link resolves, so an immediate scrape can race an
+        # empty screen (mirrors the sibling leakage test's surface guard).
+        assert page.is_visible((AppiumBy.XPATH,
+            "//*[contains(@text,'Personal') or contains(@text,'personal') or contains(@text,'Profile') or contains(@text,'Email') or contains(@text,'Name')]"),
+            timeout=STATE_PROBE_WAIT), "profile/personal deep link should open a personal-details surface"
+        # The email lives inside an EditText (and some Compose fields expose it only
+        # via @content-desc), which a TextView-only scrape misses — use value_texts()
+        # so the read actually sees what the user sees. value_texts() also carries
+        # its own per-element stale guard.
+        texts = " \n".join(page.value_texts())
         # An email is the most reliably-present, format-checkable PII field.
         import re
         emails = re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", texts)

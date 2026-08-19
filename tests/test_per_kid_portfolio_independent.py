@@ -60,6 +60,8 @@ DATA (manifest): the pre-provisioned `kids_portfolio_distinct` fixture — one p
 Run (no emulator):
   venv/bin/python -m pytest tests/test_per_kid_portfolio_independent.py -v -s -o addopts=""
 """
+import time
+
 import pytest
 
 from utils.genuser_api import SEEDED_PWD, call, mint
@@ -72,6 +74,14 @@ pytestmark = [pytest.mark.value_api, pytest.mark.kids, pytest.mark.portfolio]
 
 FIXTURE_KEY = "kids_portfolio_distinct"
 
+# A TRANSIENT read failure (no token from a rate-limited /v1/sessions, a 5xx, or a
+# network blip) is retried a bounded number of times before we fall through to SKIP, so a
+# rate-limit blip no longer silently NO-RUNS the label/independence oracle. A genuine GATE
+# (a real non-2xx contract response / a missing allocation_profile_id) skips immediately.
+# Mirrors test_networth_total_investments_recon._get_v3_user.
+_READ_ATTEMPTS = 3
+_READ_RETRY_DELAY_S = 8
+
 
 def _kid_emails(parent_email):
     """The fixture seeds kid-A at `a.<parent-email>` and kid-B at `b.<parent-email>`
@@ -81,37 +91,73 @@ def _kid_emails(parent_email):
     return "a." + parent_email, "b." + parent_email
 
 
-def _read_kid_portfolio(kid_email):
-    """Resolve a kid's OWN portfolio off the public DEV API.
+def _read_kid_portfolio_once(kid_email):
+    """ONE attempt to resolve a kid's OWN portfolio off the public DEV API.
 
-    Returns {label, uuid} where:
-      - uuid  = the kid's own allocation_profile_id (the portfolio it is wired to),
-      - label = that portfolio's published `name` (the persisted style),
-    or a string starting with 'SKIP:' describing the gate that blocked the read.
+    Returns:
+      dict {label, uuid}     on success,
+      ('GATE', reason)       on a genuine gate (missing allocation_profile_id, a real
+                             non-2xx contract response, or an absent portfolio name),
+      ('TRANSIENT', reason)  on a retriable blip (no token / 5xx / network error).
     No balance is touched."""
     op, tok = mint(kid_email, SEEDED_PWD)
     if not tok:
-        return f"SKIP: could not log in as kid {kid_email} (auth/rate-limit gate)"
+        return ("TRANSIENT", f"could not log in as kid {kid_email} (auth/rate-limit)")
 
-    s, b = call(op, "GET", "/v1/user", token=tok)
+    try:
+        s, b = call(op, "GET", "/v1/user", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /v1/user for kid {kid_email}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /v1/user for kid {kid_email} returned HTTP {s} (server error)")
     if s != 200 or not isinstance(b, dict):
-        return f"SKIP: GET /v1/user for kid {kid_email} returned HTTP {s} (read gate)"
+        return ("GATE", f"GET /v1/user for kid {kid_email} returned HTTP {s} (read gate)")
     user = b.get("user", b)
     uuid = user.get("allocation_profile_id")
     if not uuid:
-        return (f"SKIP: kid {kid_email} has no allocation_profile_id (no portfolio "
+        return ("GATE", f"kid {kid_email} has no allocation_profile_id (no portfolio "
                 "wired to the kid) — seed gate, not a product result")
 
-    s, b = call(op, "GET", f"/v1/portfolios/{uuid}", token=tok)
+    try:
+        s, b = call(op, "GET", f"/v1/portfolios/{uuid}", token=tok)
+    except Exception as e:  # network/timeout — transient
+        return ("TRANSIENT", f"network error reading /v1/portfolios/{uuid} for kid {kid_email}: {e}")
+    if s is not None and s >= 500:
+        return ("TRANSIENT", f"GET /v1/portfolios/{uuid} for kid {kid_email} returned HTTP {s} "
+                "(server error)")
     if s != 200 or not isinstance(b, dict):
-        return (f"SKIP: GET /v1/portfolios/{uuid} for kid {kid_email} returned HTTP {s} "
+        return ("GATE", f"GET /v1/portfolios/{uuid} for kid {kid_email} returned HTTP {s} "
                 "(portfolio detail read gate)")
     portfolio = b.get("portfolio", b)
     label = portfolio.get("name")
     if not label:
-        return (f"SKIP: portfolio detail for kid {kid_email} missing name "
+        return ("GATE", f"portfolio detail for kid {kid_email} missing name "
                 f"(name={label!r}) — read gate")
     return {"label": label, "uuid": uuid}
+
+
+def _read_kid_portfolio(kid_email):
+    """Resolve a kid's OWN portfolio off the public DEV API, with a BOUNDED retry that
+    distinguishes a TRANSIENT failure (no token / 5xx / network blip) from a genuine GATE
+    (missing allocation_profile_id / real non-2xx). Mints a FRESH token per attempt and
+    retries ONLY the transient; a real gate skips immediately.
+
+    Returns {label, uuid} (uuid = the kid's own allocation_profile_id; label = that
+    portfolio's published name), or a string starting with 'SKIP:' describing the gate
+    that blocked the read (unchanged contract for the caller). No balance is touched."""
+    last = None
+    for i in range(_READ_ATTEMPTS):
+        r = _read_kid_portfolio_once(kid_email)
+        if isinstance(r, dict):
+            return r
+        kind, reason = r
+        if kind == "GATE":
+            return "SKIP: " + reason
+        last = reason
+        print(f"  [read_kid {kid_email} attempt {i + 1}/{_READ_ATTEMPTS}] transient: {reason}")
+        if i < _READ_ATTEMPTS - 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+    return f"SKIP: {last} (persisted across {_READ_ATTEMPTS} bounded retries)"
 
 
 def test_per_kid_portfolio_stored_independently():
