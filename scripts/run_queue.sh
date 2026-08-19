@@ -98,6 +98,11 @@ build=$("$ADB" -s "${DEVICES[0]%%:*}" shell dumpsys package "$APP" 2>/dev/null |
 } > "${ALLURE_DIR}/environment.properties"
 
 if command -v allure >/dev/null 2>&1; then
+  # Carry prior trend history into the results so Trend/History accumulate across
+  # runs (allure reads history/ from the results dir; --clean discards it otherwise).
+  if [ -d "${ALLURE_REPORT}/history" ]; then
+    rm -rf "${ALLURE_DIR}/history"; cp -R "${ALLURE_REPORT}/history" "${ALLURE_DIR}/history"
+  fi
   allure generate --clean "$ALLURE_DIR" -o "$ALLURE_REPORT" >/dev/null 2>&1 \
     && echo "Allure report: ${ALLURE_REPORT}/index.html   (live: allure serve ${ALLURE_DIR})" \
     || echo "(allure generate failed — raw results in ${ALLURE_DIR})"

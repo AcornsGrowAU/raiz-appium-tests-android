@@ -99,11 +99,38 @@ def _dismiss_biometrics(driver, timeout=STATE_PROBE_WAIT) -> bool:
         return False
 
 
+_OOPS_XPATH = "//*[@text='Oops!' or contains(@text,'something went wrong')]"
+_OOPS_OK_XPATH = ("//android.view.View[@clickable='true']"
+                  "[.//android.widget.TextView[@text='Ok' or @text='OK']]")
+
+
+def _dismiss_oops(driver) -> bool:
+    """Dismiss the generic 'Oops! Sorry, something went wrong.' error dialog (tap
+    Ok). It overlays whatever screen is up after a transient backend/network blip
+    (a flaky call, a dropped connection, the host briefly suspending) and, left up,
+    blocks the PIN keypad and every deep link — so one transient error would
+    otherwise strand the session and cascade across the rest of the run. Snapshot
+    check; never raises. Returns True if it tapped."""
+    try:
+        if not driver.find_elements(AppiumBy.XPATH, _OOPS_XPATH):
+            return False
+        for ok in driver.find_elements(AppiumBy.XPATH, _OOPS_OK_XPATH):
+            try:
+                ok.click()
+                return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
 def _enter_pin(pin: PinPage, driver):
     """Enter the test PIN, handling the biometric-login prompt that can appear on
     the PIN page. The prompt can overlay the keypad on arrival, or pop up right
     after the PIN is accepted — in either case we click No (never enrol)."""
     _dismiss_biometrics(driver, timeout=0)  # clear an overlay before typing
+    _dismiss_oops(driver)                   # clear a transient 'Oops!' blocking the keypad
     pin.enter_pin(TEST_PIN)
     driver._biometrics_pending = True
     _dismiss_biometrics(driver)             # prompt usually appears AFTER the PIN
@@ -303,6 +330,13 @@ def _ensure_logged_in(driver):
         if home.is_loaded(timeout=STATE_PROBE_WAIT):
             break
 
+        # Transient 'Oops! Sorry, something went wrong.' dialog can overlay any
+        # screen after a backend/network blip and blocks the PIN keypad + deep
+        # links. Dismiss it and re-loop so recovery proceeds instead of stalling.
+        if _dismiss_oops(driver):
+            time.sleep(POLL_INTERVAL)
+            continue
+
         # PIN lockout: after too many PIN attempts the app blocks the PIN and demands
         # an email+password re-login ("You've made too many failed attempts to log in
         # with your PIN..."). Re-entering the PIN here would just re-trip the lockout,
@@ -460,6 +494,11 @@ def _reauthenticate_if_needed(request):
     # failing with the cascading "instrumentation process is not running" error.
     if hasattr(d, "is_alive") and not d.is_alive():
         d.recreate()
+        return
+    # A transient 'Oops!' error left over from a prior test overlays the next
+    # test's first screen; clear it and re-drive to Home so it can't cascade.
+    if _dismiss_oops(d):
+        _ensure_logged_in(d)
         return
     splash = SplashPage(d)
     # Snapshot: if user is logged out, the login link is rendered right now.
@@ -690,6 +729,53 @@ def pytest_configure(config):
         )
         with open(os.path.join(results, "environment.properties"), "w") as fh:
             fh.write(props)
+
+        # categories.json — classify failures into the known clusters so the
+        # Categories widget + Categories Trend become a triage view. A test is
+        # listed under EVERY category it matches (not first-match), so the specific
+        # buckets below overlap with the last two, which intentionally preserve
+        # Allure's default Product-defect (failed) / Test-defect (broken) totals.
+        import json
+        categories = [
+            {"name": "Onboarding gate (build change)",
+             "messageRegex": ".*onboarding stuck.*",
+             "matchedStatuses": ["failed", "broken"]},
+            {"name": "Kids consent gate",
+             "messageRegex": ".*consent/welcome.*",
+             "matchedStatuses": ["failed", "broken"]},
+            {"name": "PIN lockout / re-auth",
+             "traceRegex": ".*(Too many attempts|too many failed).*",
+             "matchedStatuses": ["failed", "broken"]},
+            {"name": "External app / browser leak",
+             "messageRegex": ".*(current_package|com\\.android\\.chrome).*",
+             "matchedStatuses": ["failed", "broken"]},
+            {"name": "Flaky / timing / instrumentation",
+             "traceRegex": ".*(TimeoutException|StaleElementReferenceException|"
+                           "instrumentation process is not running|not ready).*",
+             "matchedStatuses": ["broken"]},
+            {"name": "Product defects", "matchedStatuses": ["failed"]},
+            {"name": "Test defects", "matchedStatuses": ["broken"]},
+        ]
+        with open(os.path.join(results, "categories.json"), "w") as fh:
+            json.dump(categories, fh, indent=2)
+
+        # executor.json — label + sequence each trend point by build. Uses the CI
+        # env (Jenkins / GitHub) when present, else a local entry ordered by
+        # wall-clock so local trends still line up. buildOrder drives the trend x-axis.
+        import time
+        build_no = os.getenv("BUILD_NUMBER") or os.getenv("GITHUB_RUN_NUMBER")
+        executor = {
+            "name": os.getenv("JOB_NAME") or "local",
+            "type": ("jenkins" if os.getenv("BUILD_URL")
+                     else "github" if os.getenv("GITHUB_RUN_NUMBER") else "local"),
+            "buildName": (os.getenv("BUILD_DISPLAY_NAME")
+                          or (f"build #{build_no}" if build_no else "local run")),
+            "buildOrder": int(build_no) if (build_no and build_no.isdigit()) else int(time.time()),
+        }
+        if os.getenv("BUILD_URL"):
+            executor["buildUrl"] = os.getenv("BUILD_URL")
+        with open(os.path.join(results, "executor.json"), "w") as fh:
+            json.dump(executor, fh, indent=2)
     except Exception:
         pass
 
